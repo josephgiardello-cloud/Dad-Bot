@@ -122,6 +122,8 @@ class ContextBuilderNode(_NodeContractMixin):
     name = "context_builder"
 
     async def execute(self, registry: Any, turn_context: TurnContext) -> None:
+        if "mcp_approval_resolution" in turn_context.metadata and turn_context.metadata.get("source_mode") is True:
+            raise ValueError("MCP approval decisions cannot run in source mode")
         if turn_context.metadata.get("source_mode") is True:
             service = registry.get("source_grounding_service")
             turn_context.state["source_reply"] = service.answer(
@@ -144,6 +146,10 @@ class ContextBuilderNode(_NodeContractMixin):
             rich_context = {}
         rich_context.setdefault("temporal", dict(turn_context.state.get("temporal") or {}))
         turn_context.state["rich_context"] = rich_context
+        if "mcp_approval_resolution" in turn_context.metadata:
+            turn_context.state["tool_ir"] = {"requests": []}
+            turn_context.state["turn_plan"] = {"strategy": "mcp_approval_continuation"}
+            return
         # Keep semantic cognition contract: planner always runs after context build.
         await PlannerNode().run(turn_context)
 
@@ -295,6 +301,10 @@ class MCPToolNode(_NodeContractMixin):
     name = "mcp_tools"
 
     async def execute(self, registry: Any, turn_context: TurnContext) -> None:
+        resolution = getattr(turn_context, "metadata", {}).get("mcp_approval_resolution")
+        if resolution is not None:
+            await self._resolve_approval(registry, turn_context)
+            return
         if getattr(turn_context, "metadata", {}).get("source_mode") is True:
             return
         service = _registry_get_optional(registry, "mcp_tool_service")
@@ -314,6 +324,23 @@ class MCPToolNode(_NodeContractMixin):
         if not InferenceNode._candidate_text(candidate).strip():
             raise RuntimeError("Configured MCP tool service produced an empty candidate")
         turn_context.state["candidate"] = candidate
+        turn_context.state["mcp_tool_candidate_ready"] = True
+
+    @staticmethod
+    async def _resolve_approval(registry: Any, turn_context: TurnContext) -> None:
+        if turn_context.metadata.get("source_mode") is True:
+            raise ValueError("MCP approval decisions cannot run in source mode")
+        service = _registry_get_optional(registry, "mcp_tool_service")
+        resolve = getattr(service, "resolve_in_graph", None)
+        if not callable(resolve):
+            raise RuntimeError("MCP approval continuation requires a wired graph resolver")
+        result = resolve(turn_context)
+        if not inspect.isawaitable(result):
+            raise TypeError("MCP graph resolver must return an awaitable result")
+        reply = await result
+        if not isinstance(reply, str) or not reply.strip():
+            raise RuntimeError("MCP approval continuation returned an empty result")
+        turn_context.state["candidate"] = (reply, False)
         turn_context.state["mcp_tool_candidate_ready"] = True
 
 

@@ -84,6 +84,7 @@ _CANONICAL_CHECKPOINT_FIELDS = {
     "event_sequence_id",
     "occurred_at",
     "execution_mode",
+    "tool_io_ledger",
 }
 
 
@@ -255,7 +256,7 @@ class ConversationPersistenceManager:
         if not normalized:
             return None
         ledger = self._execution_ledger()
-        for event in reversed(ledger.read()):
+        for event in reversed(ledger.read(event_types=frozenset({"GRAPH_CHECKPOINT"}))):
             if str(event.get("type") or "") != "GRAPH_CHECKPOINT":
                 continue
             event_session_id = str(event.get("session_id") or "").strip()
@@ -360,7 +361,9 @@ class ConversationPersistenceManager:
 
     def _lifecycle_projection(self) -> ExecutionProjection:
         projection = ExecutionProjection()
-        projection.rebuild_from_ledger(self._execution_ledger().read())
+        projection.rebuild_from_ledger(
+            self._execution_ledger().read(event_types=frozenset({"EXECUTION_LIFECYCLE"})),
+        )
         return projection
 
     def _resolve_execution_id_for_trace(self, trace_token: str) -> str:
@@ -368,7 +371,7 @@ class ConversationPersistenceManager:
         if not normalized_trace_id:
             return ""
         ledger = self._execution_ledger()
-        for event in reversed(ledger.read()):
+        for event in reversed(ledger.read(event_types=frozenset({"EXECUTION_LIFECYCLE", "JOB_SUBMITTED"}))):
             if str(event.get("type") or "") == "EXECUTION_LIFECYCLE":
                 if str(event.get("trace_id") or "").strip() != normalized_trace_id:
                     continue
@@ -391,7 +394,7 @@ class ConversationPersistenceManager:
         if not normalized_trace_id:
             return "default"
         ledger = self._execution_ledger()
-        for event in reversed(ledger.read()):
+        for event in reversed(ledger.read(payload_types=frozenset())):
             if str(event.get("trace_id") or "").strip() != normalized_trace_id:
                 continue
             session_id = str(event.get("session_id") or "").strip()
@@ -1074,7 +1077,7 @@ class ConversationPersistenceManager:
         snapshot = events_snapshot
         if snapshot is None:
             ledger = self._execution_ledger()
-            snapshot = ledger.read()
+            snapshot = ledger.read(event_types=frozenset({"TURN_EVENT"}))
         events: list[dict[str, Any]] = []
         strict_reject = self._strict_schema_reject_enabled()
         for event in snapshot:
@@ -1112,7 +1115,7 @@ class ConversationPersistenceManager:
 
         ledger = self._execution_ledger()
         collected: list[dict[str, Any]] = []
-        for event in ledger.read():
+        for event in ledger.read(event_types=frozenset({"TURN_EVENT", POLICY_TRACE_EVENT_TYPE})):
             event_type = str(event.get("type") or "")
             if event_type == "TURN_EVENT":
                 payload = dict(event.get("payload") or {})
@@ -1381,7 +1384,7 @@ class ConversationPersistenceManager:
             if requested_tenant_id:
                 self._require_checkpoint_authority(requested_tenant_id)
             ledger = self._execution_ledger()
-            for event in reversed(ledger.read()):
+            for event in reversed(ledger.read(event_types=frozenset({"GRAPH_CHECKPOINT"}))):
                 if str(event.get("type") or "") != "GRAPH_CHECKPOINT":
                     continue
                 event_session_id = str(event.get("session_id") or "").strip()

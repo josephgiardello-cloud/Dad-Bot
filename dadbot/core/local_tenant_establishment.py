@@ -5,6 +5,7 @@ from __future__ import annotations
 import hashlib
 import json
 import os
+from contextlib import nullcontext
 from copy import deepcopy
 from datetime import datetime, timezone
 from pathlib import Path
@@ -15,10 +16,20 @@ from dadbot.core.execution_ledger import ExecutionLedger
 from dadbot.core.ledger_backend import FileWALLedgerBackend, WALCorruptionError, _validate_append_head
 from dadbot.core.tenant_memory_ledger import (
     TenantMemoryOperationConflict,
+    TenantMemoryRevision,
     TenantMemoryRevisionConflict,
     replay_tenant_memory,
     validate_tenant_memory_state,
 )
+
+
+def local_projection_path(bot: Any, path: str | Path) -> str | Path:
+    ledger = getattr(bot, "_execution_ledger", None)
+    if not isinstance(getattr(ledger, "_backend", None), FileWALLedgerBackend) or str(path) == ":memory:":
+        return path
+    tenant_hash = hashlib.sha256(bot.config.tenant_id.encode("utf-8")).hexdigest()
+    configured = Path(path)
+    return configured.with_name(f"{configured.stem}.tenant-{tenant_hash}{configured.suffix}")
 
 
 def _write_evidence(path: Path, payload: dict[str, Any]) -> None:
@@ -172,14 +183,68 @@ def commit_local_tenant(
     state: dict[str, Any],
     publish: Callable[[], None],
     repair_snapshot: Callable[[dict[str, Any]], None],
+    *,
+    execution_ledger: ExecutionLedger | None = None,
 ) -> int:
     """Commit a candidate and repair its snapshot while holding the WAL writer lock."""
     from dadbot_system.delegation import tenant_mutation_fence
 
-    with tenant_mutation_fence(tenant_id, required=False):
+    if execution_ledger is not None and execution_ledger._backend is not backend:
+        raise ValueError("The shared execution ledger must own the tenant WAL backend")
+    with tenant_mutation_fence(tenant_id, required=False), (
+        execution_ledger._lock if execution_ledger is not None else nullcontext()
+    ):
         return _commit_local_tenant_fenced(
-            backend, tenant_id, expected_revision, operation_id, state, publish, repair_snapshot
+            backend, tenant_id, expected_revision, operation_id, state, publish, repair_snapshot,
+            execution_ledger=execution_ledger,
         )
+
+
+def _verified_local_commit_head(
+    backend: FileWALLedgerBackend, execution_ledger: ExecutionLedger | None,
+) -> tuple[list[dict[str, Any]], bytes, ExecutionLedger, bool, bool]:
+    from dadbot_system.delegation import _execution_authority
+
+    backend._authorize_event({})
+    backend._read_binding()
+    reuse = type(backend) is FileWALLedgerBackend and _execution_authority.get() is None
+    events, prefix_bytes, unchanged = backend._append_verifier.load_prefix(
+        backend._path, backend._load_unlocked, reuse=reuse,
+    )
+    shared_matches = (
+        reuse and execution_ledger is not None and execution_ledger._backend is backend
+        and not execution_ledger._replay_filters and not execution_ledger._backend_uncertain
+        and events == execution_ledger._events
+    )
+    if shared_matches and unchanged and execution_ledger is not None:
+        ledger = execution_ledger
+        ledger.validate_cache()
+    else:
+        ledger = ExecutionLedger()
+        ledger._backend._events = events
+        ledger.load_from_backend()
+    return events, prefix_bytes, ledger, shared_matches, reuse
+
+
+def _require_established_tenant(
+    backend: FileWALLedgerBackend, tenant_id: str, current: TenantMemoryRevision,
+) -> None:
+    tenant_hash = hashlib.sha256(tenant_id.encode("utf-8")).hexdigest()
+    evidence = backend._path.with_name(backend._path.name + ".tenant-" + tenant_hash)
+    try:
+        marker = json.loads(evidence.read_text(encoding="utf-8"))
+    except (OSError, ValueError) as exc:
+        raise WALCorruptionError("Tenant establishment evidence is missing or invalid") from exc
+    first = next(iter(current.operations.values()), {}).get("event")
+    if (
+        not isinstance(marker, dict)
+        or marker.get("tenant_id") != tenant_id
+        or marker.get("status") != "established"
+        or marker.get("operation_id") != "migration-" + tenant_hash
+        or not isinstance(first, dict)
+        or marker.get("initial_event_sha256") != first.get("event_sha256")
+    ):
+        raise WALCorruptionError("Tenant establishment evidence does not match the WAL")
 
 
 def _commit_local_tenant_fenced(
@@ -190,6 +255,8 @@ def _commit_local_tenant_fenced(
     state: dict[str, Any],
     publish: Callable[[], None],
     repair_snapshot: Callable[[dict[str, Any]], None],
+    *,
+    execution_ledger: ExecutionLedger | None = None,
 ) -> int:
     candidate = validate_tenant_memory_state(state)
     if not backend._fsync_enabled:
@@ -198,27 +265,9 @@ def _commit_local_tenant_fenced(
     with backend._lock, lock.locked():
         if not backend._path.exists():
             raise WALCorruptionError("Execution WAL is missing during tenant commit")
-        events = backend._load_unlocked()
-        ledger = ExecutionLedger()
-        ledger._backend._events = deepcopy(events)
-        ledger.load_from_backend()
+        events, prefix_bytes, ledger, shared_matches, reuse = _verified_local_commit_head(backend, execution_ledger)
         current = ledger.replay_tenant_memory(tenant_id)
-        tenant_hash = hashlib.sha256(tenant_id.encode("utf-8")).hexdigest()
-        evidence = backend._path.with_name(backend._path.name + ".tenant-" + tenant_hash)
-        try:
-            marker = json.loads(evidence.read_text(encoding="utf-8"))
-        except (OSError, ValueError) as exc:
-            raise WALCorruptionError("Tenant establishment evidence is missing or invalid") from exc
-        first = next(iter(current.operations.values()), {}).get("event")
-        if (
-            not isinstance(marker, dict)
-            or marker.get("tenant_id") != tenant_id
-            or marker.get("status") != "established"
-            or marker.get("operation_id") != "migration-" + tenant_hash
-            or not isinstance(first, dict)
-            or marker.get("initial_event_sha256") != first.get("event_sha256")
-        ):
-            raise WALCorruptionError("Tenant establishment evidence does not match the WAL")
+        _require_established_tenant(backend, tenant_id, current)
         prior = current.operations.get(operation_id)
         if prior is not None:
             if prior["expected_revision"] != expected_revision or prior["state"] != candidate:
@@ -250,11 +299,19 @@ def _commit_local_tenant_fenced(
             },
         }
         ledger._seal_payload_hash_chain(event, ledger.get_next_sequence())
-        _validate_append_head(events, event)
-        with backend._path.open("a", encoding="utf-8") as handle:
-            handle.write(json.dumps(event, default=str) + "\n")
+        _validate_append_head(events, event, verified_prefix=events == ledger._events)
+        if execution_ledger is not None:
+            execution_ledger._backend_content_digest = None
+            execution_ledger._backend_uncertain = True
+        line = json.dumps(event, default=str) + "\n"
+        with backend._path.open("a", encoding="utf-8", newline="") as handle:
+            handle.write(line)
             handle.flush()
             os.fsync(handle.fileno())
         publish()
         repair_snapshot(deepcopy(candidate))
+        digest = backend._append_verifier.record(prefix_bytes, line, events, event, reuse=reuse)
+        if shared_matches and execution_ledger is not None:
+            execution_ledger._record_committed_event(deepcopy(event), ("", ""))
+            execution_ledger._backend_content_digest = digest
         return expected_revision + 1

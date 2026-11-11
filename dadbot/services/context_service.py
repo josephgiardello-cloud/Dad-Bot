@@ -534,7 +534,9 @@ class ContextService:
             raise RuntimeError("TemporalNode required — execution invalid")
         user_input = str(getattr(turn_context, "user_input", "") or "")
         session_id = str(
-            (getattr(turn_context, "metadata", {}) or {}).get("control_plane", {}).get("session_id") or "default",
+            (getattr(turn_context, "metadata", {}) or {}).get("control_plane", {}).get("session_id")
+            or (getattr(turn_context, "metadata", {}) or {}).get("session_id")
+            or "default",
         )
         with ensure_execution_trace_root(
             operation="memory_read",

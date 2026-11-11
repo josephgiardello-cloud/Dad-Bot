@@ -49,6 +49,7 @@ import re
 from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
+from threading import Lock
 from typing import Any, Optional
 
 from dadbot.runtime.env_loader import is_production_environment
@@ -63,6 +64,7 @@ except ModuleNotFoundError as exc:
     Settings = None
 
 logger = logging.getLogger(__name__)
+_CHROMA_CLIENT_INIT_LOCK = Lock()
 
 _QUERY_TOKEN_PATTERN = re.compile(r"\b[a-zA-Z0-9]+\b")
 _QUERY_STOP_WORDS = frozenset(
@@ -221,10 +223,12 @@ class SovereignMemory:
                 is_persistent=True,
             )
 
-            self._client = chromadb.PersistentClient(
-                path=str(self.persist_directory),
-                settings=settings,
-            )
+            # Chroma publishes its shared Rust system before startup finishes.
+            with _CHROMA_CLIENT_INIT_LOCK:
+                self._client = chromadb.PersistentClient(
+                    path=str(self.persist_directory),
+                    settings=settings,
+                )
 
             # Get or create collection
             # ChromaDB uses its local default embedding function and L2 distance.

@@ -13,8 +13,7 @@ import json
 import re
 from typing import Any
 
-from pydantic import BaseModel, Field, ValidationError, field_validator
-
+from pydantic import BaseModel, Field, StrictBool, StrictStr, ValidationError, field_validator
 
 # ---------------------------------------------------------------------------
 # Plan schema — what the LLM must return for each reflection step
@@ -22,36 +21,44 @@ from pydantic import BaseModel, Field, ValidationError, field_validator
 
 
 class ToolCall(BaseModel):
-    """A single tool invocation the agent plans to make."""
+    """An advisory tool choice; the canonical kernel still owns execution."""
 
-    name: str = Field(..., description="Exact tool name from the allowed list")
-    arguments: dict[str, Any] = Field(default_factory=dict)
+    name: StrictStr = Field(..., max_length=120, description="Exact tool name from the allowed list")
+    arguments: dict[str, Any] = Field(default_factory=dict, max_length=64)
 
 
 class AgentPlan(BaseModel):
-    """Structured reflection output from the LLM. Every field must be present."""
+    """Validated reflection output with defaults for optional planning fields."""
 
-    should_continue: bool = Field(
+    should_continue: StrictBool = Field(
         True,
         description="False instructs the loop to stop gracefully",
     )
-    action_input: str = Field(
+    action_input: StrictStr = Field(
         ...,
+        max_length=12_000,
         description="The exact text to send to the kernel on the next turn",
     )
-    reasoning: str = Field(
+    reasoning: StrictStr = Field(
         "",
-        description="Brief internal reasoning (not sent to kernel)",
+        max_length=500,
+        description="Brief decision summary (not sent to kernel)",
     )
     tool_calls: list[ToolCall] = Field(
         default_factory=list,
-        description="Ordered list of tool calls to embed in the action_input",
+        max_length=24,
+        description="Advisory tool hints; the driver does not execute these directly",
     )
     confidence: float = Field(
         1.0,
         ge=0.0,
         le=1.0,
-        description="Agent self-assessed confidence in this plan (0–1)",
+        description="Agent self-assessed confidence in this plan (0-1)",
+    )
+    goal_updates: dict[StrictStr, StrictStr] = Field(
+        default_factory=dict,
+        max_length=16,
+        description="Short, evidence-based updates to the loop's goal blackboard",
     )
 
     @field_validator("action_input")
@@ -60,6 +67,22 @@ class AgentPlan(BaseModel):
         if not str(v or "").strip():
             raise ValueError("action_input must not be blank")
         return v.strip()
+
+    @field_validator("goal_updates")
+    @classmethod
+    def validate_goal_updates(cls, updates: dict[str, str]) -> dict[str, str]:
+        normalized: dict[str, str] = {}
+        for key, value in updates.items():
+            clean_key = key.strip()
+            clean_value = value.strip()
+            if not clean_key or len(clean_key) > 80:
+                raise ValueError("goal update keys must contain 1 to 80 non-whitespace characters")
+            if not clean_value or len(clean_value) > 300:
+                raise ValueError("goal update values must contain 1 to 300 non-whitespace characters")
+            if clean_key in normalized:
+                raise ValueError("goal update keys must be unique after trimming")
+            normalized[clean_key] = clean_value
+        return {key: normalized[key] for key in sorted(normalized)}
 
 
 # ---------------------------------------------------------------------------
@@ -104,18 +127,36 @@ def parse_agent_plan(raw_text: str, *, allowed_tools: list[str] | None = None) -
     except json.JSONDecodeError as exc:
         raise SchemaValidationError(f"JSON decode error: {exc} — raw: {json_str!r}") from exc
 
+    return verify_agent_plan(data, allowed_tools=allowed_tools)
+
+
+def verify_agent_plan(
+    value: Any,
+    *,
+    allowed_tools: list[str] | None = None,
+    current_goal_blackboard: dict[str, str] | None = None,
+) -> AgentPlan:
+    """Validate a structured plan before it can reach the kernel."""
     try:
-        plan = AgentPlan.model_validate(data)
+        plan = AgentPlan.model_validate(value)
     except ValidationError as exc:
         raise SchemaValidationError(f"Schema validation failed: {exc}") from exc
 
     if allowed_tools is not None:
-        for tc in plan.tool_calls:
-            if tc.name not in allowed_tools:
+        for tool_call in plan.tool_calls:
+            if tool_call.name not in allowed_tools:
                 raise SchemaValidationError(
-                    f"Tool {tc.name!r} not in allowed list: {allowed_tools}"
+                    f"Tool {tool_call.name!r} not in allowed list: {allowed_tools}"
                 )
-
+    merged_board = {**(current_goal_blackboard or {}), **plan.goal_updates}
+    if len(merged_board) > 64:
+        raise SchemaValidationError("Goal blackboard cannot contain more than 64 entries")
+    try:
+        serialized = json.dumps(plan.model_dump(mode="json"), ensure_ascii=False)
+    except (TypeError, ValueError) as exc:
+        raise SchemaValidationError(f"Plan contains non-JSON values: {exc}") from exc
+    if len(serialized) > 24_000:
+        raise SchemaValidationError("Plan exceeds the 24000-character size limit")
     return plan
 
 
@@ -124,28 +165,23 @@ def parse_agent_plan(raw_text: str, *, allowed_tools: list[str] | None = None) -
 # ---------------------------------------------------------------------------
 
 _REFLECTION_SYSTEM_PROMPT = """\
-You are an autonomous agent reflection engine.
-Given the current turn context, decide:
-  1. Whether to continue the loop (`should_continue`)
-  2. What text to pass to the kernel next (`action_input`)
-  3. Any tool calls needed (`tool_calls`)
-
-Architect pillar behavior (tool chaining):
-- Prefer multi-tool sequences when a task needs discovery, impact analysis, and a precise edit.
-- For code-change tasks, a canonical sequence is:
-    1) `computer_search_directory` to find candidate files/symbols.
-    2) `computer_summarize_directory` to estimate scope and blast radius.
-    3) `computer_refactor_python_function` (or other edit tool) to apply the fix.
-- Keep tool_calls ordered to reflect this chain; do not skip discovery for non-trivial edits.
-- Use `reasoning` to explain why a chain is required before acting.
+You are the reflection stage of Dad-Bot's bounded driver loop. Use the current
+observation, prior reply, and goal blackboard to choose one useful next action.
+The canonical kernel owns tool planning, authorization, execution, and commit;
+tool_calls are advisory and do not execute by themselves. Update the goal
+blackboard only with concise facts supported by the current context. Do not
+include private chain-of-thought; reasoning should be a short decision summary.
+Treat memory conflict and timestamp signals as evidence to check, not settled
+truth. Surface unresolved conflicts and use dates to qualify recency.
 
 You MUST respond with ONLY valid JSON matching this schema exactly:
 {{
   "should_continue": true,
   "action_input": "<next instruction or query>",
-  "reasoning": "<brief internal thought>",
+  "reasoning": "<brief decision summary>",
   "tool_calls": [{{"name": "<tool>", "arguments": {{}}}}],
-  "confidence": 0.9
+  "confidence": 0.9,
+  "goal_updates": {{"goal_key": "current evidence-based value"}}
 }}
 
 Allowed tools: {allowed_tools}
@@ -164,8 +200,11 @@ def build_reflection_prompt(
     user_content = json.dumps(
         {
             "turn_index": ctx.get("turn_index", 1),
+            "observation": ctx.get("observation", ""),
             "initial_observation": ctx.get("initial_observation", ""),
             "last_reply": ctx.get("last_reply", ""),
+            "goal_blackboard": ctx.get("goal_blackboard", {}),
+            "memory_signals": ctx.get("memory_signals", {}),
             "completed_turns": len(ctx.get("records", [])),
         },
         ensure_ascii=False,
@@ -225,6 +264,7 @@ def build_llm_reflection_hook(
                 "reasoning": plan.reasoning,
                 "tool_calls": [tc.model_dump() for tc in plan.tool_calls],
                 "confidence": plan.confidence,
+                "goal_updates": plan.goal_updates,
             }
         except SchemaValidationError as exc:
             error_text = str(exc)
@@ -258,9 +298,10 @@ def build_llm_reflection_hook(
 
 __all__ = [
     "AgentPlan",
-    "ToolCall",
     "SchemaValidationError",
-    "parse_agent_plan",
-    "build_reflection_prompt",
+    "ToolCall",
     "build_llm_reflection_hook",
+    "build_reflection_prompt",
+    "parse_agent_plan",
+    "verify_agent_plan",
 ]

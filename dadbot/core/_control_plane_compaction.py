@@ -10,45 +10,32 @@ from pathlib import Path
 from typing import Any
 
 from dadbot.core.compaction import ArchiveTier, CompactionPolicy, EventCompactor
+from dadbot.core.execution_ledger import ExecutionLedger, _event_digest_record
 from dadbot.core.semantic_primitives import hash as semantic_hash
 
 logger = logging.getLogger(__name__)
+_BUILTIN_COMPACT = EventCompactor.compact
 
 
 class CompactionMixin:
+    ledger: ExecutionLedger
+
     @staticmethod
     def _stable_hash(payload: Any) -> str:
         return semantic_hash(payload)
 
     def _job_trace_events(self, job) -> list[dict[str, Any]]:
-        events = list(self.ledger.read())
         trace_id = str(job.trace_id or "").strip()
         job_id = str(job.job_id or "").strip()
-        filtered = [
-            dict(event)
-            for event in events
-            if (
-                str(event.get("trace_id") or "").strip() == trace_id
-                or str(dict(event.get("payload") or {}).get("job_id") or "").strip() == job_id
-            )
-        ]
-        return sorted(filtered, key=lambda item: int(item.get("sequence") or 0))
+        events = self.ledger.read(trace_id=trace_id, job_id=job_id)
+        return sorted(events, key=lambda item: int(item.get("sequence") or 0))
 
     @staticmethod
     def _event_stream_digest(events: list[dict[str, Any]]) -> str:
-        canonical = [
-            {
-                "sequence": int(event.get("sequence") or 0),
-                "type": str(event.get("type") or ""),
-                "trace_id": str(event.get("trace_id") or ""),
-                "session_id": str(event.get("session_id") or ""),
-                "kernel_step_id": str(event.get("kernel_step_id") or ""),
-                "payload_hash": hashlib.sha256(
-                    json.dumps(dict(event.get("payload") or {}), sort_keys=True, default=str).encode("utf-8"),
-                ).hexdigest(),
-            }
-            for event in list(events or [])
-        ]
+        return CompactionMixin._digest_records([_event_digest_record(event) for event in list(events or [])])
+
+    @staticmethod
+    def _digest_records(canonical: list[dict[str, str | int]]) -> str:
         return hashlib.sha256(
             json.dumps(canonical, sort_keys=True, default=str).encode("utf-8"),
         ).hexdigest()
@@ -156,23 +143,44 @@ class CompactionMixin:
         }
 
     def _maybe_compact_ledger(self) -> dict[str, Any]:
+        from dadbot_system.delegation import _execution_authority
+
         hard_max = self._env_int("DADBOT_LEDGER_HARD_LIMIT_EVENTS", 50000, minimum=500)
-        pre_events = list(self.ledger.read())
+        with self.ledger._lock:
+            if not self.ledger.telemetry_snapshot()["event_count"]:
+                return {"compacted": False, "reason": "empty", "event_count": 0, **self._partition_summary([])}
+            compactor = self._ensure_compactor()
+            compact = compactor.compact
+            summarized = (
+                type(compactor) is EventCompactor
+                and getattr(compact, "__func__", None) is _BUILTIN_COMPACT
+                and type(self.ledger) is ExecutionLedger
+                and self._event_stream_digest is CompactionMixin._event_stream_digest
+                and getattr(self._partition_summary, "__func__", None) is CompactionMixin._partition_summary
+                and not self.ledger._replay_filters
+                and not self.ledger._authenticated_authority_required
+                and _execution_authority.get() is None
+            )
+            pre_events = self.ledger.read_digest_records() if summarized else self.ledger.read()
+            snapshot_version = self.ledger.telemetry_snapshot()["version"]
         event_count = len(pre_events)
 
-        if event_count <= 0:
-            return {"compacted": False, "reason": "empty", "event_count": 0, **self._partition_summary(pre_events)}
-
         force = bool(event_count >= hard_max)
-        compactor = self._ensure_compactor()
         snapshot = {"head_sequence": event_count}
-        report = dict(compactor.compact(ledger=self.ledger, snapshot=snapshot, force=force) or {})
-        post_events = list(self.ledger.read())
+        report = dict(compact(ledger=self.ledger, snapshot=snapshot, force=force) or {})
+        with self.ledger._lock:
+            unchanged = (
+                type(compactor) is EventCompactor
+                and not bool(report.get("compacted", False))
+                and self.ledger.telemetry_snapshot()["version"] == snapshot_version
+            )
+            post_events = pre_events if unchanged else self.ledger.read()
+        pre_digest = self._digest_records(pre_events) if summarized else self._event_stream_digest(pre_events)
         lossless_proof = {
             "contract_version": "ledger-compaction-lossless-v1",
             "equivalent": True,
-            "pre_digest": self._event_stream_digest(pre_events),
-            "reconstructed_digest": self._event_stream_digest(post_events),
+            "pre_digest": pre_digest,
+            "reconstructed_digest": pre_digest if unchanged else self._event_stream_digest(post_events),
             "archived_event_count": 0,
             "reconstructed_event_count": len(post_events),
             "sequence_equivalent": True,

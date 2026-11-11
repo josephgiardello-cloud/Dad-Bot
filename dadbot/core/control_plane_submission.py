@@ -13,6 +13,7 @@ from dadbot.core.control_plane_lifecycle import (
     _assert_lifecycle_emission_transition,
     _resolved_execution_mode,
 )
+from dadbot.core.control_plane_projection import ExecutionProjection
 from dadbot.core.planning_utils import build_runtime_plan as _build_runtime_plan
 
 
@@ -48,7 +49,12 @@ async def _register_submit_job_impl(
             kernel_step_id="control_plane.submit_turn",
             committed=False,
         )
-    control_plane.lifecycle_projection.rebuild_from_ledger(control_plane.ledger.read())
+    projection = control_plane.lifecycle_projection
+    events = (
+        control_plane.ledger.read(event_types=frozenset({"EXECUTION_LIFECYCLE"}))
+        if type(projection) is ExecutionProjection else control_plane.ledger.read()
+    )
+    projection.rebuild_from_ledger(events)
     _apply_projection_execution_state(job, control_plane.lifecycle_projection.get(job.job_id))
     job.metadata["execution_mode"] = _resolved_execution_mode(job)
 

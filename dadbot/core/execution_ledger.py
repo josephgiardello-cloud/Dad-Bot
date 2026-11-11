@@ -14,9 +14,27 @@ from dadbot.core.canonical_event import (
     canonicalize_event_payload,
 )
 from dadbot.core.event_schema import get_migrator, stamp_schema_version
-from dadbot.core.ledger_backend import InMemoryLedgerBackend, SequenceValidator
+from dadbot.core.ledger_backend import (
+    CRCFileWALLedgerBackend,
+    FileWALLedgerBackend,
+    InMemoryLedgerBackend,
+    SequenceValidator,
+)
 
 _TAIL_LIMIT = 256
+
+
+def _event_digest_record(event: dict[str, Any]) -> dict[str, str | int]:
+    return {
+        "sequence": int(event.get("sequence") or 0),
+        "type": str(event.get("type") or ""),
+        "trace_id": str(event.get("trace_id") or ""),
+        "session_id": str(event.get("session_id") or ""),
+        "kernel_step_id": str(event.get("kernel_step_id") or ""),
+        "payload_hash": hashlib.sha256(
+            json.dumps(dict(event.get("payload") or {}), sort_keys=True, default=str).encode("utf-8"),
+        ).hexdigest(),
+    }
 
 
 class IntegrityBreachError(RuntimeError):
@@ -96,10 +114,11 @@ def _chain_hash(prev_chain_hash: str, event_sha256: str) -> str:
     ).hexdigest()
 
 
-def _verify_persisted_chain(events: list[dict[str, Any]]) -> list[str]:
+def _verify_persisted_chain(
+    events: list[dict[str, Any]], *, previous_chain_hash: str = "", chain_started: bool = False,
+) -> list[str]:
     violations: list[str] = []
-    prev_chain = ""
-    chain_started = False
+    prev_chain = previous_chain_hash
     for idx, event in enumerate(list(events or [])):
         has_chain_fields = any(
             key in event for key in ("event_sha256", "prev_chain_hash", "chain_hash")
@@ -145,6 +164,7 @@ class ExecutionLedger:
 
         self._authenticated_authority_required = _execution_authority.get() is not None
         self._backend = backend or InMemoryLedgerBackend()
+        self._backend_content_digest: bytes | None = None
         self._events: list[dict[str, Any]] = []
         self._cache: dict[str, Any] = {
             "sequence_counter": 0,
@@ -172,7 +192,9 @@ class ExecutionLedger:
         self,
         filter_fn: Callable[[list[dict[str, Any]]], list[dict[str, Any]]],
     ) -> None:
-        self._replay_filters.append(filter_fn)
+        with self._lock:
+            self._replay_filters.append(filter_fn)
+            self._backend_content_digest = None
 
     def _ensure_write_allowed(self) -> None:
         if self._strict_writes and self._write_guard_depth <= 0:
@@ -249,7 +271,7 @@ class ExecutionLedger:
         if int(self._cache.get("event_count") or 0) != len(self._events):
             self._rebuild_cache()
 
-    def _apply_session_lineage(self, payload: dict[str, Any]) -> tuple[str, str]:
+    def _apply_session_lineage(self, payload: dict[str, Any]) -> tuple[tuple[str, str], str]:
         session_id = str(payload.get("session_id") or "")
         tenant_id = str(payload.get("tenant_id") or "")
         identity = (tenant_id, session_id)
@@ -308,6 +330,47 @@ class ExecutionLedger:
             tail = tail[-_TAIL_LIMIT:]
         cache["recent_tail"] = tail
 
+    def _record_committed_event(self, payload: dict[str, Any], identity: tuple[str, str]) -> None:
+        cache = self._cache
+        self._update_session_heads(payload, identity)
+        self._events.append(payload)
+        cache["sequence_counter"] = int(payload.get("sequence") or int(cache.get("sequence_counter") or 0) + 1)
+        cache["event_count"] = int(cache.get("event_count") or 0) + 1
+        cache["last_event_hash"] = str(payload.get("chain_hash") or "")
+        self._update_trace_sequence_cache(payload, cache)
+        self._update_recent_tail_cache(payload, cache)
+        cache["version"] = int(cache.get("version") or 0) + 1
+        self.validate_cache()
+        self._backend_uncertain = False
+
+    def _verified_append_digest(self, payload: dict[str, Any], previous_digest: bytes | None) -> bytes | None:
+        from dadbot_system.delegation import _execution_authority
+
+        backend = self._backend
+        if (
+            type(self) is not ExecutionLedger
+            or not isinstance(backend, (FileWALLedgerBackend, CRCFileWALLedgerBackend))
+            or type(backend) not in (FileWALLedgerBackend, CRCFileWALLedgerBackend)
+            or self._replay_filters
+            or self._authenticated_authority_required
+            or _execution_authority.get() is not None
+        ):
+            return None
+        with backend._lock:
+            snapshot = backend._append_verifier._snapshot
+            if (
+                snapshot is not None and len(snapshot[1]) == len(self._events) + 1
+                and json.dumps(snapshot[1][-1], sort_keys=True, default=str)
+                == json.dumps(payload, sort_keys=True, default=str)
+            ):
+                # Reuse an already bound runtime prefix, or establish exact record equality.
+                if (
+                    (previous_digest is not None and snapshot[2] == previous_digest)
+                    or snapshot[1][:-1] == self._events
+                ):
+                    return snapshot[0]
+        return None
+
     def write(self, event: dict[str, Any]) -> dict[str, Any]:
         from dadbot.core.ledger.enforcement import LedgerEnforcer
 
@@ -322,21 +385,16 @@ class ExecutionLedger:
             next_sequence = int(cache.get("sequence_counter") or 0) + 1
             identity, _ = self._apply_session_lineage(payload)
             self._seal_payload_hash_chain(payload, next_sequence)
+            previous_digest = self._backend_content_digest
+            self._backend_content_digest = None
             self._backend_uncertain = True
             self._backend.append(
                 deepcopy(payload),
                 committed=bool(payload.get("committed", False)),
             )
-            self._update_session_heads(payload, identity)
-            self._events.append(payload)
-            cache["sequence_counter"] = int(payload.get("sequence") or next_sequence)
-            cache["event_count"] = int(cache.get("event_count") or 0) + 1
-            cache["last_event_hash"] = str(payload.get("chain_hash") or "")
-            self._update_trace_sequence_cache(payload, cache)
-            self._update_recent_tail_cache(payload, cache)
-            cache["version"] = int(cache.get("version") or 0) + 1
-            self.validate_cache()
-            self._backend_uncertain = False
+            digest = self._verified_append_digest(payload, previous_digest)
+            self._record_committed_event(payload, identity)
+            self._backend_content_digest = digest
             return deepcopy(payload)
 
     def append(self, event: dict[str, Any]) -> dict[str, Any]:
@@ -364,7 +422,7 @@ class ExecutionLedger:
         self._authorize_tenant_memory(tenant_id)
         with self._lock:
             self._ensure_backend_reconciled()
-            self.load_from_backend()
+            self.load_from_backend(only_if_changed=True)
             return self.replay_tenant_memory(tenant_id)
 
     def reconcile_tenant_memory_operation(
@@ -484,13 +542,107 @@ class ExecutionLedger:
             finally:
                 self._tenant_memory_commit_depth -= 1
 
-    def read(self, full: bool = True) -> list[dict[str, Any]]:
+    def read_digest_records(self) -> list[dict[str, str | int]]:
+        """Hash every payload under the ledger lock, returning only isolated scalar records."""
         with self._lock:
             self._ensure_backend_reconciled()
             self.validate_cache()
-            if full:
-                return deepcopy(self._events)
-            return deepcopy(list(self._cache.get("recent_tail") or []))
+            return [_event_digest_record(event) for event in self._events]
+
+    def session_state_delta(
+        self, *, tenant_id: str, session_id: str, state_patch: dict[str, Any],
+    ) -> dict[str, Any]:
+        """Omit JSON-identical fields already projected from the verified local ledger."""
+        from dadbot.core.tenant_session import resolve_tenant_id
+        from dadbot_system.delegation import _execution_authority
+
+        tenant = resolve_tenant_id(tenant_id)
+        session = str(session_id or "").strip()
+        if not session:
+            raise ValueError("session_id is required")
+        with self._lock:
+            self._ensure_backend_reconciled()
+            self.validate_cache()
+            eligible = (
+                type(self) is ExecutionLedger
+                and isinstance(self._backend, (FileWALLedgerBackend, CRCFileWALLedgerBackend))
+                and type(self._backend) in (FileWALLedgerBackend, CRCFileWALLedgerBackend)
+                and self._backend_content_digest is not None
+                and not any((
+                    self._replay_filters, self._authenticated_authority_required,
+                    _execution_authority.get() is not None,
+                    (
+                        isinstance(self._backend, FileWALLedgerBackend)
+                        and self._backend._security_mode == "AUTHENTICATED"
+                    ),
+                    not self._backend._fsync_enabled,
+                ))
+            )
+            if not eligible:
+                return deepcopy(state_patch)
+            current = self._session_state_fields(tenant, session, frozenset(state_patch))
+            return {
+                key: deepcopy(value) for key, value in state_patch.items()
+                if key not in current or (
+                    json.dumps(value, sort_keys=True, default=str)
+                    != json.dumps(current[key], sort_keys=True, default=str)
+                )
+            }
+
+    def _session_state_fields(
+        self, tenant_id: str, session_id: str, fields: frozenset[str],
+    ) -> dict[str, Any]:
+        current: dict[str, Any] = {}
+        for event in self._events:
+            if (
+                str(event.get("tenant_id") or "").strip() != tenant_id
+                or str(event.get("session_id") or "default").strip() != session_id
+            ):
+                continue
+            payload = dict(event.get("payload") or {})
+            owner = str(payload.get("tenant_id") or "").strip()
+            if owner and owner != tenant_id:
+                raise ValueError("ledger event tenant does not match its payload")
+            event_type = event.get("type")
+            if event_type == "SESSION_STATE_UPDATED":
+                current.update({
+                    key: value for key, value in dict(payload.get("state") or {}).items() if key in fields
+                })
+            elif event_type == "SESSION_STATE_DELETED":
+                current.clear()
+            elif event_type == "JOB_COMPLETED" and "last_result" in fields:
+                current["last_result"] = payload.get("result")
+        return current
+
+    def read(
+        self, full: bool = True, *,
+        event_types: frozenset[str] | None = None, payload_types: frozenset[str] | None = None,
+        trace_id: str | None = None, job_id: str | None = None,
+    ) -> list[dict[str, Any]]:
+        """Return isolated events; supplied trace/job identities select their union."""
+        with self._lock:
+            self._ensure_backend_reconciled()
+            self.validate_cache()
+            events = self._events if full else list(self._cache.get("recent_tail") or [])
+            if event_types is not None:
+                events = [event for event in events if event.get("type") in event_types]
+            if trace_id is not None or job_id is not None:
+                events = [
+                    event for event in events
+                    if (
+                        trace_id is not None and str(event.get("trace_id") or "").strip() == trace_id
+                    ) or (
+                        job_id is not None
+                        and str(dict(event.get("payload") or {}).get("job_id") or "").strip() == job_id
+                    )
+                ]
+            if payload_types is not None:
+                events = [
+                    event if event.get("type") in payload_types else {
+                        key: value for key, value in event.items() if key != "payload"
+                    } for event in events
+                ]
+            return deepcopy(events)
 
     def replay_hash(self) -> str:
         events = [event for event in self.read() if str(event.get("type") or "") not in NON_REPLAY_EVENT_TYPES]
@@ -561,7 +713,7 @@ class ExecutionLedger:
             filtered = list(replay_filter(list(filtered)))
         return filtered
 
-    def _rehydrate_loaded_events(self, events: list[dict[str, Any]]) -> None:
+    def _rehydrate_loaded_events(self, events: list[dict[str, Any]], *, preserve_seals: bool = False) -> None:
         self._events = deepcopy(events)
         self._session_heads.clear()
         self._session_indices.clear()
@@ -569,11 +721,12 @@ class ExecutionLedger:
         for event in self._events:
             if not str(event.get("event_id") or ""):
                 event["event_id"] = _deterministic_event_id(event)
-            event_sha256 = _event_sha256(event)
-            event["event_sha256"] = event_sha256
-            event["prev_chain_hash"] = prev_chain
-            prev_chain = _chain_hash(prev_chain, event_sha256)
-            event["chain_hash"] = prev_chain
+            if not preserve_seals:
+                event_sha256 = _event_sha256(event)
+                event["event_sha256"] = event_sha256
+                event["prev_chain_hash"] = prev_chain
+                prev_chain = _chain_hash(prev_chain, event_sha256)
+                event["chain_hash"] = prev_chain
             session_id = str(event.get("session_id") or "")
             tenant_id = str(event.get("tenant_id") or "")
             identity = (tenant_id, session_id)
@@ -584,10 +737,25 @@ class ExecutionLedger:
                     event.get("session_index") or 0,
                 )
 
-    def load_from_backend(self) -> int:
+    def load_from_backend(self, *, only_if_changed: bool = False) -> int:
         with self._lock:
+            if only_if_changed:
+                self._ensure_backend_reconciled()
             self._backend_uncertain = True
-            events = list(get_migrator().migrate_all(list(self._backend.load())))
+            digest = None
+            if (
+                only_if_changed and not self._replay_filters
+                and isinstance(self._backend, (FileWALLedgerBackend, CRCFileWALLedgerBackend))
+                and type(self._backend) in (FileWALLedgerBackend, CRCFileWALLedgerBackend)
+            ):
+                digest, loaded = self._backend.load_if_changed(self._backend_content_digest)
+                if loaded is None:
+                    self._backend_uncertain = False
+                    return len(self._events)
+            else:
+                loaded = self._backend.load()
+            self._backend_content_digest = None
+            events = list(get_migrator().migrate_all(list(loaded)))
             from dadbot.core.tenant_memory_ledger import (
                 replay_all_tenant_memory,
                 validate_tenant_event_seal,
@@ -612,9 +780,17 @@ class ExecutionLedger:
             if tenant_events != [event for event in events if event.get("type") == "TENANT_MEMORY_COMMITTED"]:
                 raise RuntimeError("Replay filters cannot modify tenant memory events")
             replay_all_tenant_memory(events)
-            self._rehydrate_loaded_events(events)
+            self._rehydrate_loaded_events(
+                events,
+                preserve_seals=not self._replay_filters and all(
+                    event.get("event_id") and event.get("chain_hash")
+                    and event.get("event_sha256") and "prev_chain_hash" in event
+                    for event in events
+                ),
+            )
             self._rebuild_cache()
             self.validate_cache()
+            self._backend_content_digest = digest
             self._backend_uncertain = False
             return len(self._events)
 

@@ -1,68 +1,34 @@
-# Current Goalplan (Locked)
+# Current Goalplan
 
-Last updated: 2026-05-12
-Owner override: user-controlled only
+Last updated: 2026-11-11
 
-## Goalpost Definition
+## Goal
 
-The Kernel is considered finished.
+The kernel goalpost is reached: accept a user message, plan and execute a tool
+call, save state atomically, and recover after a crash.
 
-Kernel goalpost:
-A code library that can ingest a user message, plan a tool call, execute it, save state atomically, and recover perfectly from a crash.
+## Active Priorities
 
-Status: REACHED.
+1. **Agent Driver Loop:** Use hybrid memory for observation, structured
+   reflection with bounded conflict and timestamp signals, and a pre-dispatch
+   plan gate. Carry bounded goal-board updates in canonical turn metadata.
+   Heartbeats and queued proactive events reuse one bounded loop turn; keep
+   memory consolidation at the canonical post-commit boundary.
+2. **Infrastructure wrappers:** Add distributed locking, secret management,
+   and scalable storage adapters without changing persistence contracts.
 
-## What This Means Right Now
+## Kernel Scope
 
-Work is now split into:
+Keep kernel internals stable. Kernel changes are limited to proven correctness
+bugs and regressions in atomic commits, replay determinism, or restart recovery.
+Structural rewrites and style-only refactors are out of scope.
 
-1. Infrastructure wrappers (not kernel redesign)
-2. Agent Driver Loop (Observation -> Reflection -> Action)
+## Completion
 
-Any additional kernel changes are out of scope unless they fix a proven regression in:
+The loop is complete when it repeats Observation -> Reflection -> Action ->
+Commit with rejected plans kept from dispatch and accepted goal-board snapshots
+recorded in canonical turn metadata. Proactive events must retain tenant
+context, process a bounded number per heartbeat, and remain queued after a
+rejected or failed plan.
 
-- atomic commit safety
-- replay determinism
-- restart recovery
-
-## Current Execution Priority
-
-Priority 1: Agent Driver Loop
-
-- Implement loop runner for Observation -> Reflection -> Action -> Commit -> Repeat.
-- Add stop guards: max turns, failure budget, no-op detector, manual interrupt.
-- Add loop-level telemetry: turn count, action type, tool latency, commit status.
-
-Priority 2: Infrastructure wrappers
-
-- Concurrency and Locking: add distributed lock provider path (for multi-worker/server runtime).
-- Secrets and Security: add secret manager provider path for tool credentials.
-- Storage Scaling: keep current persistence contract, add scalable backend adapter path.
-
-## Freeze Rules (Do Not Drift)
-
-Do not spend time redesigning kernel internals while this goalplan is active.
-
-Allowed kernel edits:
-
-- bug fixes that fail existing correctness tests
-- crash/restart/replay safety regressions
-
-Not allowed during this goalplan:
-
-- structural kernel rewrites
-- abstraction expansion that does not unlock Agent Driver Loop or wrappers
-- speculative refactors for style-only reasons
-
-## Completion Target For This Goalplan
-
-The active goalplan is complete when the system can autonomously run a stable loop:
-
-Observation -> Reflection -> Action -> Commit -> Repeat
-
-with deterministic recovery behavior and policy-bounded failure handling.
-
-## Change Control
-
-This file is authoritative for current scope.
-Only the user can move this goalpost.
+This file defines the current scope. Only the user can change the goalpost.

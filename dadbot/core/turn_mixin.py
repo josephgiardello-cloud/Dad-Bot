@@ -13,10 +13,10 @@ import asyncio
 import hashlib
 import json
 import logging
+import time
 from collections.abc import Awaitable, Callable, Iterable, Mapping
 from typing import Any, cast
 from uuid import uuid4
-
 
 from dadbot.contracts import AttachmentList, ChunkCallback, FinalizedTurnResult
 from dadbot.core.execution_contract import (
@@ -33,15 +33,15 @@ from dadbot.core.execution_contract import (
 from dadbot.core.graph_failure_handler import DadBotGraphFailureHandlerMixin
 from dadbot.core.kernel_locks import KernelReplaySequenceLock
 from dadbot.core.kernel_signals import CorrelationContext, TracingContext
-from dadbot.memory.ledger import MemoryLedger
 from dadbot.core.policy_store import DadPolicyStore
-from dadbot.core.runtime_service_provider import DefaultCoreRuntimeServices
 from dadbot.core.runtime_errors import (
     ConfigurationError,
     TransientExecutionError,
 )
+from dadbot.core.runtime_service_provider import DefaultCoreRuntimeServices
 from dadbot.core.turn_handler import TurnContext, TurnHandler
 from dadbot.core.world_model import WorldModelStore
+from dadbot.memory.ledger import MemoryLedger
 from dadbot.utils.async_bridge import run_coro_in_thread
 
 logger = logging.getLogger(__name__)
@@ -140,12 +140,14 @@ class DadBotTurnMixin(DadBotGraphFailureHandlerMixin):
     def _derive_confluence_key(
         *,
         tenant_id: str = "",
+        request_id: str = "",
         session_id: str,
         user_input: str,
         attachments: AttachmentList | None,
     ) -> str:
         payload = {
             "tenant_id": str(tenant_id or ""),
+            "request_id": str(request_id or ""),
             "session_id": str(session_id or "default"),
             "user_input": str(user_input or ""),
             "attachments": list(attachments or []),
@@ -166,8 +168,10 @@ class DadBotTurnMixin(DadBotGraphFailureHandlerMixin):
         session_id = str(getattr(self, "_execute_turn_session_id", "") or "").strip() or str(
             getattr(self, "active_thread_id", "") or "default",
         )
+        request_metadata["request_id"] = str(request_metadata.get("request_id") or "").strip() or uuid4().hex
         confluence_key = self._derive_confluence_key(
             tenant_id=str(request_metadata.get("tenant_id") or ""),
+            request_id=str(request_metadata["request_id"]),
             session_id=session_id,
             user_input=str(user_input or ""),
             attachments=attachments,
@@ -369,7 +373,10 @@ class DadBotTurnMixin(DadBotGraphFailureHandlerMixin):
         tap = self._resolve_event_tap()
         if tap is None:
             if not getattr(self, "_checkpoint_unavailable_reported", False):
-                logger.warning("Turn checkpoint unavailable: no event tap is configured")
+                logger.warning(
+                    "Optional EventTap checkpoint unavailable: no event tap is configured; "
+                    "canonical graph checkpoints use separate persistence",
+                )
                 self._checkpoint_unavailable_reported = True
             return
         maybe_checkpoint = getattr(tap, "maybe_checkpoint", None)
@@ -442,6 +449,9 @@ class DadBotTurnMixin(DadBotGraphFailureHandlerMixin):
             raise ValueError("turn metadata tenant identity does not match its trusted context")
         if context_tenant_id:
             request_metadata["tenant_id"] = context_tenant_id
+        request_metadata["request_id"] = (
+            str(request_metadata.get("request_id") or request_context.request_id or "").strip() or uuid4().hex
+        )
         event_mode = self._delivery_event_mode(request.delivery)
         previous_session_id = str(getattr(self, "_execute_turn_session_id", "") or "")
         previous_request_metadata = dict(getattr(self, "_execute_turn_request_metadata", {}) or {})
@@ -454,6 +464,8 @@ class DadBotTurnMixin(DadBotGraphFailureHandlerMixin):
             user_input=user_input,
             attachment_count=len(attachments),
         )
+        started = time.perf_counter()
+        completed = False
         try:
             if request.delivery in SYNC_DELIVERIES:
                 result = self._run_graph_turn_sync(
@@ -476,6 +488,7 @@ class DadBotTurnMixin(DadBotGraphFailureHandlerMixin):
                 should_end=bool(result[1]),
             )
             self._checkpoint_turn_state()
+            completed = True
             return self._response_from_result(request, result)
         except Exception as exc:
             self._emit_turn_event(
@@ -496,6 +509,12 @@ class DadBotTurnMixin(DadBotGraphFailureHandlerMixin):
                 "Graph execution failed after failure handler dispatch.",
             ) from exc
         finally:
+            logger.info(
+                "DadBot turn mode=%s seconds=%.3f status=%s",
+                event_mode,
+                time.perf_counter() - started,
+                "ok" if completed else "error",
+            )
             self._execute_turn_session_id = previous_session_id
             self._execute_turn_request_metadata = previous_request_metadata
             self._active_turn_run_id = ""
@@ -718,7 +737,10 @@ class DadBotTurnMixin(DadBotGraphFailureHandlerMixin):
         mode: ExecutionMode,
         base_context: SovereignContext | None = None,
     ) -> SovereignContext:
-        resolved_context = base_context or SovereignContext()
+        resolved_context = base_context or SovereignContext(
+            session_id=str(getattr(self, "active_thread_id", "") or "default"),
+            tenant_id=str(getattr(self, "tenant_id", "") or "default"),
+        )
         active_trace_id = str(TracingContext.current_trace_id() or "").strip()
         active_correlation_id = str(CorrelationContext.current() or "").strip()
         resolved_trace_id = (
@@ -727,7 +749,7 @@ class DadBotTurnMixin(DadBotGraphFailureHandlerMixin):
             or active_correlation_id
             or uuid4().hex
         )
-        resolved_request_id = str(resolved_context.request_id or "").strip() or resolved_trace_id
+        resolved_request_id = str(resolved_context.request_id or "").strip() or uuid4().hex
         return SovereignContext(
             session_id=str(resolved_context.session_id or getattr(self, "active_thread_id", "") or "default"),
             tenant_id=str(resolved_context.tenant_id or getattr(self, "tenant_id", "") or "default"),

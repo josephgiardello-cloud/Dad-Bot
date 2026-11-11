@@ -3,6 +3,7 @@ from types import SimpleNamespace
 
 import pytest
 
+from dadbot.core.boot_mixin import DadBotBootMixin
 from dadbot.services.context_service import ContextService
 
 pytestmark = pytest.mark.unit
@@ -89,3 +90,35 @@ def test_proactive_heartbeat_queues_daily_checkin_once(bot, monkeypatch):
     assert first["queued_daily_checkin"] == 1
     assert second["queued_daily_checkin"] == 0
     assert len(queued) == 1
+
+
+def test_background_heartbeat_uses_streamlit_turn_lock_for_event_dispatch(monkeypatch):
+    calls = []
+    lock_state = {"held": False}
+
+    class _TrackedLock:
+        def __enter__(self):
+            lock_state["held"] = True
+
+        def __exit__(self, *_args):
+            lock_state["held"] = False
+
+    monkeypatch.setattr(
+        "dadbot.ui.streamlit_context.streamlit_turn_lock",
+        lambda _bot: _TrackedLock(),
+    )
+
+    def _run_heartbeat(**kwargs):
+        assert lock_state["held"]
+        calls.append(kwargs)
+
+    worker = SimpleNamespace(
+        _proactive_heartbeat_interval_seconds=300,
+        assistant=SimpleNamespace(run_heartbeat=_run_heartbeat),
+        background_tasks=SimpleNamespace(wait_for_shutdown=lambda _timeout: True),
+    )
+    worker._run_proactive_heartbeat_tick = lambda: DadBotBootMixin._run_proactive_heartbeat_tick(worker)
+
+    DadBotBootMixin._run_proactive_heartbeat_loop(worker)
+
+    assert calls == [{"force": False}]

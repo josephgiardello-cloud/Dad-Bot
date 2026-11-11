@@ -72,7 +72,14 @@ class RuntimeClientManager:
         self.context = DadBotContext.from_runtime(bot)
         self.bot = self.context.bot
 
-    def _prepare_ollama_request(self, model, messages, options, purpose):
+    def _resolve_ollama_think(self, think: bool | None, purpose: str) -> bool | None:
+        if think is not None:
+            return think
+        if purpose == "chat":
+            return getattr(self.bot.runtime_config, "ollama_chat_think", None)
+        return None
+
+    def _prepare_ollama_request(self, model, messages, options, purpose, *, think: bool | None = None):
         request_options = dict(options or {})
         runtime = self.bot.model_runtime
         context_budget = int(request_options.get("num_ctx", runtime.effective_context_token_budget(model)))
@@ -84,7 +91,7 @@ class RuntimeClientManager:
         request_options["num_ctx"] = context_budget
         reserved = max(64, int(self.bot.RESERVED_RESPONSE_TOKENS))
         capabilities = runtime.ollama_show_payload(model).get("capabilities") or []
-        if "thinking" in capabilities:
+        if "thinking" in capabilities and self._resolve_ollama_think(think, purpose) is not False:
             reserved = max(reserved, 3072)
         reserved = min(reserved, context_budget // 2)
         guarded = self.bot.guard_chat_request_messages(
@@ -109,6 +116,12 @@ class RuntimeClientManager:
             raise RuntimeError(
                 f"Ollama {purpose} exhausted its context/generation budget without a visible answer "
                 f"(prompt_tokens={payload.get('prompt_eval_count')}, generated_tokens={payload.get('eval_count')})",
+            )
+        if not visible.strip():
+            raise RuntimeError(
+                f"Ollama {purpose} on {model} completed without a visible answer "
+                f"(done_reason={payload.get('done_reason')!r}, prompt_tokens={payload.get('prompt_eval_count')}, "
+                f"generated_tokens={payload.get('eval_count')})",
             )
 
     @staticmethod
@@ -470,6 +483,7 @@ class RuntimeClientManager:
                     think=think,
                 )
         enforce_model_gateway(caller=normalized_caller)
+        think = self._resolve_ollama_think(think, purpose)
         last_error = None
 
         for candidate in [
@@ -477,7 +491,9 @@ class RuntimeClientManager:
             *[model for model in self.bot.model_candidates() if model != self.bot.ACTIVE_MODEL],
         ]:
             try:
-                guarded, request_options = self._prepare_ollama_request(candidate, messages, options, purpose)
+                guarded, request_options = self._prepare_ollama_request(
+                    candidate, messages, options, purpose, think=think,
+                )
                 kwargs = {
                     "model": candidate,
                     "messages": guarded,
@@ -524,6 +540,7 @@ class RuntimeClientManager:
                     think=think,
                 )
         enforce_model_gateway(caller=normalized_caller)
+        think = self._resolve_ollama_think(think, purpose)
         last_error = None
         self._ensure_event_loop_context()
 
@@ -533,7 +550,9 @@ class RuntimeClientManager:
             *[name for name in self.bot.model_candidates() if name != selected_model],
         ]:
             try:
-                guarded, request_options = self._prepare_ollama_request(candidate, messages, options, purpose)
+                guarded, request_options = self._prepare_ollama_request(
+                    candidate, messages, options, purpose, think=think,
+                )
                 kwargs = {
                     "model": candidate,
                     "messages": guarded,
@@ -588,7 +607,8 @@ class RuntimeClientManager:
         think: bool | None = None,
     ):
         enforce_model_gateway(caller=str(caller or ""))
-        guarded, request_options = self._prepare_ollama_request(model_name, messages, options, purpose)
+        think = self._resolve_ollama_think(think, purpose)
+        guarded, request_options = self._prepare_ollama_request(model_name, messages, options, purpose, think=think)
         kwargs = {
             "model": model_name,
             "messages": guarded,
@@ -621,6 +641,7 @@ class RuntimeClientManager:
         think: bool | None = None,
     ):
         enforce_model_gateway(caller=str(caller or ""))
+        think = self._resolve_ollama_think(think, purpose)
         last_error = None
 
         selected_model = str(model or self.bot.ACTIVE_MODEL or "").strip()
@@ -630,7 +651,9 @@ class RuntimeClientManager:
         ]:
             chunks: list[str] = []
             try:
-                guarded, request_options = self._prepare_ollama_request(candidate, messages, options, purpose)
+                guarded, request_options = self._prepare_ollama_request(
+                    candidate, messages, options, purpose, think=think,
+                )
                 kwargs = {
                     "model": candidate, "messages": guarded, "stream": True, "options": request_options,
                     "keep_alive": self.bot.runtime_config.ollama_keep_alive_seconds,
@@ -822,6 +845,7 @@ class RuntimeClientManager:
         think: bool | None = None,
     ):
         enforce_model_gateway(caller=str(caller or ""))
+        think = self._resolve_ollama_think(think, purpose)
         last_error = None
         client = self.ollama_async_client()
 
@@ -845,7 +869,9 @@ class RuntimeClientManager:
             ]:
                 chunks: list[str] = []
                 try:
-                    guarded, request_options = self._prepare_ollama_request(candidate, messages, options, purpose)
+                    guarded, request_options = self._prepare_ollama_request(
+                        candidate, messages, options, purpose, think=think,
+                    )
                     kwargs = {
                         "model": candidate, "messages": guarded, "stream": True, "options": request_options,
                         "keep_alive": self.bot.runtime_config.ollama_keep_alive_seconds,

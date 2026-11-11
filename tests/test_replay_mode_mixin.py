@@ -37,7 +37,6 @@ def test_replay_mode_detect_with_checkpoint():
     mock_persistence = Mock()
     mock_persistence.load_latest_graph_checkpoint.return_value = {
         "stage": "complete",
-        "tool_io_ledger": {},
     }
 
     mock_services = Mock()
@@ -61,18 +60,7 @@ def test_replay_mode_restore_tool_io_ledger():
     """Test that tool_io_ledger is restored from checkpoint."""
     mixin = _ReplayModeTestHelper()
 
-    # Create a mock tool_io_ledger dict
-    tool_io_dict = {
-        "turn_id": "turn-123",
-        "tool_calls": {
-            "call-1": {
-                "tool_name": "test_tool",
-                "input_args": {"arg1": "value1"},
-                "output": {"result": "success"},
-                "execution_time_seconds": 0.5,
-            }
-        },
-    }
+    tool_io_dict = ToolIOLedger().to_dict()
 
     mock_persistence = Mock()
     mock_persistence.load_latest_graph_checkpoint.return_value = {
@@ -96,7 +84,7 @@ def test_replay_mode_restore_tool_io_ledger():
 
 
 def test_replay_mode_corrupted_tool_io_ledger():
-    """Test graceful degradation if tool_io_ledger is corrupted."""
+    """Corrupt durable IO must not become an empty replay ledger."""
     mixin = _ReplayModeTestHelper()
 
     # Invalid tool_io_ledger data
@@ -110,15 +98,20 @@ def test_replay_mode_corrupted_tool_io_ledger():
     mock_services.get_persistence_service.return_value = mock_persistence
     mixin.services = mock_services
 
-    metadata = mixin._detect_and_prepare_replay_mode(
-        session_id="session-123",
-        trace_id="trace-456",
-    )
+    with pytest.raises(ValueError, match="tool IO"):
+        mixin._detect_and_prepare_replay_mode(session_id="session-123", trace_id="trace-456")
 
-    # Replay mode still enabled, ledger is restored (as empty) due to graceful handling
-    assert metadata["replay_mode"] is True
-    assert "_tool_io_ledger" in metadata or "_tool_io_ledger" not in metadata
-    # Acceptance: either successfully restored as empty, or gracefully skipped
+
+def test_replay_mode_schema_failure_does_not_fall_back_to_live():
+    from dadbot.core.persistence_record_schema import PersistenceSchemaError
+
+    mixin = _ReplayModeTestHelper()
+    persistence = Mock()
+    persistence.load_latest_graph_checkpoint.side_effect = PersistenceSchemaError("Corrupt checkpoint tool IO")
+    mixin.services = Mock()
+    mixin.services.get_persistence_service.return_value = persistence
+    with pytest.raises(PersistenceSchemaError, match="Corrupt checkpoint"):
+        mixin._detect_and_prepare_replay_mode(session_id="session-123", trace_id="trace-456")
 
 
 def test_replay_mode_no_persistence_service():
@@ -186,7 +179,7 @@ def test_replay_mode_empty_tool_io_ledger():
     mock_persistence = Mock()
     mock_persistence.load_latest_graph_checkpoint.return_value = {
         "stage": "complete",
-        "tool_io_ledger": {},
+        "tool_io_ledger": ToolIOLedger().to_dict(),
     }
 
     mock_services = Mock()
@@ -199,8 +192,7 @@ def test_replay_mode_empty_tool_io_ledger():
     )
 
     assert metadata["replay_mode"] is True
-    # Empty ledger doesn't need restoration
-    assert "_tool_io_ledger" not in metadata
+    assert metadata["_tool_io_ledger"].is_empty()
 
 
 if __name__ == "__main__":

@@ -675,7 +675,7 @@ class DadBotBootMixin:
             int(getattr(self, "_proactive_heartbeat_interval_seconds", 3600) or 3600),
         )
         try:
-            self.maintenance_scheduler.run_proactive_heartbeat()
+            self._run_proactive_heartbeat_tick()
         except Exception as exc:  # noqa: BLE001
             import logging
 
@@ -686,7 +686,7 @@ class DadBotBootMixin:
 
         while not self.background_tasks.wait_for_shutdown(interval_seconds):
             try:
-                self.maintenance_scheduler.run_proactive_heartbeat()
+                self._run_proactive_heartbeat_tick()
             except Exception as exc:  # noqa: BLE001
                 import logging
 
@@ -694,6 +694,12 @@ class DadBotBootMixin:
                     "Proactive heartbeat tick failed: %s",
                     exc,
                 )
+
+    def _run_proactive_heartbeat_tick(self) -> None:
+        from dadbot.ui.streamlit_context import streamlit_turn_lock
+
+        with streamlit_turn_lock(self):
+            self.assistant.run_heartbeat(force=False)
 
     # ------------------------------------------------------------------
     # Ollama and model utilities (static)

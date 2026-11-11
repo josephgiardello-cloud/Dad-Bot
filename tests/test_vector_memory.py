@@ -1,6 +1,9 @@
 from __future__ import annotations
 
 import json
+from concurrent.futures import ThreadPoolExecutor
+from concurrent.futures import TimeoutError as FutureTimeoutError
+from threading import Event
 from typing import Any
 
 import pytest
@@ -8,6 +11,42 @@ import pytest
 from dadbot.services.vector_memory import SovereignMemory
 
 pytestmark = pytest.mark.unit
+
+
+def test_concurrent_clients_wait_for_chroma_startup(monkeypatch, tmp_path):
+    rust = pytest.importorskip("chromadb.api.rust")
+    original_start = rust.RustBindingsAPI.start
+    starting = Event()
+    release = Event()
+
+    def delayed_start(client):
+        starting.set()
+        if not release.wait(10):
+            raise TimeoutError("Chroma startup test was not released")
+        original_start(client)
+
+    monkeypatch.setattr(rust.RustBindingsAPI, "start", delayed_start)
+    memories = []
+    with ThreadPoolExecutor(max_workers=2) as workers:
+        first = workers.submit(SovereignMemory, tmp_path / "concurrent-store")
+        assert starting.wait(10)
+        second = workers.submit(SovereignMemory, tmp_path / "concurrent-store")
+        try:
+            try:
+                second.result(timeout=0.1)
+            except FutureTimeoutError:
+                pass
+        finally:
+            release.set()
+        memories = [first.result(timeout=10), second.result(timeout=10)]
+    try:
+        assert all(memory._initialized for memory in memories)
+        assert all(memory._collection is not None for memory in memories)
+    finally:
+        for memory in memories:
+            memory.shutdown()
+            assert memory._client is not None
+            memory._client.close()
 
 
 class _CollectionStub:

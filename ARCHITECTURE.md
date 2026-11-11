@@ -5,24 +5,13 @@ Dad-Bot uses one canonical turn path. `DadBotTurnMixin` creates a `TurnHandler`,
 which normalizes the request and delegates to the control plane. There is no
 runtime path toggle or supported legacy execution branch.
 
-## Source of Truth Decision
-Single source of truth for execution ordering remains in:
+## Execution-Order Authority
+`dadbot/core/control_plane.py` owns submit-turn ordering and enforces its phase
+contract. No secondary scheduler or orchestrator defines phase semantics.
 
-- `dadbot/core/control_plane.py`
-
-This module owns the canonical submit-turn phase contract and runtime enforcement.
-No secondary scheduler/orchestrator may define independent phase semantics.
-
-## Thin Spine Role
-Thin spine lives in:
-
-- `dadbot/core/turn_handler.py`
-
-Role:
-
-- Stateless deterministic adapter.
-- Normalizes turn context and delegates to authoritative submit path.
-- No state authority, no independent scheduling, no persistence ownership.
+`dadbot/core/turn_handler.py` is the stateless ingress adapter: it normalizes
+turn context and delegates to the control plane. It owns neither scheduling nor
+persistence.
 
 ## Checkpoint and Replay Responsibilities
 Checkpoint-like components have separate roles and are not interchangeable:
@@ -72,30 +61,3 @@ validation tooling.
 | `DadBotCompatMixin` | Pending | Evaluate split into small compatibility services | Larger and more coupled than convenience; do in dedicated slice |
 | Turn routing | Converged | `DadBotTurnMixin` → `TurnHandler` → control plane | Missing control-plane submit entrypoint is a configuration error |
 | `control_plane.py` sequencing | Stabilized | Keep as authority | Submit-turn phase order explicit and runtime-validated |
-
-## Mental Model
-1. UI/runtime submits user turn.
-2. `DadBotTurnMixin` normalizes session and request metadata.
-3. `TurnHandler` delegates to the control-plane submit entrypoint.
-4. Control plane enforces deterministic phase ordering.
-5. Plugins/services provide optional capabilities around the authoritative spine.
-
-## Text Diagram
-
-```text
-[Streamlit / CLI / API]
-        |
-        v
-   [TurnHandler]
-        |
-        v
- [Execution Control Plane]  <-- single ordering authority
-                 |
-                 v
-      [Schedulers / Ledgers / Persistence / Services]
-```
-
-## Decision Log
-- Keep the control plane as the single execution-order authority.
-- Keep `TurnHandler` as stateless ingress normalization.
-- Remove one mixin cluster per slice with tests after each step.

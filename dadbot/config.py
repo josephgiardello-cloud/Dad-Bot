@@ -11,6 +11,26 @@ from dadbot_system import ServiceConfig, normalize_tenant_id
 from dadbot_system.contracts import DEFAULT_TENANT_ID
 
 
+def _ollama_chat_think_from_env() -> bool | None:
+    value = os.getenv("DADBOT_OLLAMA_CHAT_THINK", "auto").strip().lower()
+    if value in {"", "auto"}:
+        return None
+    if value == "true":
+        return True
+    if value == "false":
+        return False
+    raise ValueError("DADBOT_OLLAMA_CHAT_THINK must be auto, true, or false")
+
+
+def _memory_index_postgres_dsn(postgres_dsn: str) -> str:
+    backend = os.environ.get("DADBOT_MEMORY_INDEX_BACKEND", "auto").strip().lower()
+    if backend == "auto":
+        return postgres_dsn
+    if backend == "sqlite":
+        return ""
+    raise ValueError("DADBOT_MEMORY_INDEX_BACKEND must be auto or sqlite")
+
+
 @dataclass(frozen=True)
 class GraphStoreBackendConfig:
     postgres_dsn: str = ""
@@ -137,6 +157,7 @@ class DadRuntimeConfig:
     ollama_keep_alive_seconds: int = field(
         default_factory=lambda: int(os.environ.get("DADBOT_OLLAMA_KEEP_ALIVE_SECONDS", "-1"))
     )
+    ollama_chat_think: bool | None = field(default_factory=_ollama_chat_think_from_env)
     memory_reranker_enabled: bool = field(
         default_factory=lambda: os.environ.get("DADBOT_MEMORY_RERANKER_ENABLED", "0") == "1"
     )
@@ -439,11 +460,11 @@ class DadBotConfig:
         hnsw_ef_construction = str(os.environ.get("DADBOT_SEMANTIC_HNSW_EF_CONSTRUCTION") or "64").strip() or "64"
         ivfflat_lists = str(os.environ.get("DADBOT_SEMANTIC_IVFFLAT_LISTS") or "100").strip() or "100"
         self.graph_store = GraphStoreBackendConfig(
-            postgres_dsn=self.postgres_dsn,
+            postgres_dsn=_memory_index_postgres_dsn(self.postgres_dsn),
             table_prefix=graph_table_prefix,
         )
         self.semantic_index = SemanticIndexBackendConfig(
-            postgres_dsn=self.postgres_dsn,
+            postgres_dsn=self.graph_store.postgres_dsn,
             table=semantic_table,
             vector_dimensions=int(vector_dimensions) if vector_dimensions else None,
             ann_index=ann_index,

@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import json
+
 import pytest
 
 from dadbot.assistant_runtime import AssistantRuntime
@@ -21,15 +23,29 @@ class _CyclingKernel:
         self._turns = list(turns)
         self._idx = 0
         self.calls: list[str] = []
+        self.requests = []
+        self.reflection_payloads = []
 
     def execute_turn(self, request, **_kwargs):
         assert request.delivery == TurnDelivery.SYNC
+        self.requests.append(request)
         self.calls.append(str(request.input.text or ""))
         if self._idx < len(self._turns):
             reply, should_end = self._turns[self._idx]
             self._idx += 1
             return TurnResponse(reply=reply, should_end=should_end)
         return TurnResponse(reply="", should_end=False)
+
+    def call_llm(self, messages, **_kwargs):
+        payload = json.loads(messages[1]["content"])
+        self.reflection_payloads.append(payload)
+        updates = {"status": "in progress"} if payload["turn_index"] == 1 else {}
+        return json.dumps(
+            {
+                "action_input": payload["observation"],
+                "goal_updates": updates,
+            }
+        )
 
 
 class _FailAfterNKernel:
@@ -126,6 +142,16 @@ def test_run_agent_loop_on_facade_returns_result():
 
     assert result.completed_turns == 2
     assert result.stop_reason == "kernel_should_end"
+    assert result.goal_blackboard == {"status": "in progress"}
+    assert kernel.requests[0].metadata["agent_loop"]["goal_blackboard"] == {
+        "status": "in progress"
+    }
+    assert kernel.requests[0].metadata["agent_loop"]["trigger_type"] == "interactive"
+    assert kernel.reflection_payloads[1]["goal_blackboard"] == {"status": "in progress"}
+    assert kernel.reflection_payloads[0]["memory_signals"] == {
+        "conflicts": [],
+        "temporal": [],
+    }
 
 
 def test_run_agent_loop_default_policy():

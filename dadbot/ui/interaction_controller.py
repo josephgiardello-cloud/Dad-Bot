@@ -6,6 +6,7 @@ import os
 import time
 import uuid
 from collections.abc import Callable
+from contextlib import nullcontext
 from typing import Any
 
 import ollama
@@ -15,16 +16,25 @@ from dadbot.runtime_core.streamlit_runtime import StreamlitRuntime
 from dadbot.ui.helpers import apply_ui_preferences, find_available_image_model
 from dadbot.ui.prefs_state import sync_ui_voice_from_profile, ui_preferences
 from dadbot.ui.state_manager import record_runtime_rejection
+from dadbot.ui.streamlit_context import streamlit_turn_lock
 
 logger = logging.getLogger(__name__)
 
 
 @st.cache_resource(show_spinner=False)
-def get_runtime() -> StreamlitRuntime:
+def _standalone_runtime() -> StreamlitRuntime:
     return StreamlitRuntime.build()
 
 
-@st.cache_resource(show_spinner=False)
+def get_runtime() -> StreamlitRuntime:
+    bot = st.session_state.get("bot")
+    if bot is not None:
+        return StreamlitRuntime(
+            bot, canonical_ui=True, thread_id=str(st.session_state.get("active_thread_id") or "default"),
+        )
+    return _standalone_runtime()
+
+
 def get_chat_event_api() -> Any:
     return get_runtime().api
 
@@ -166,95 +176,98 @@ def process_prompt_via_runtime(
     turn_controls: dict | None = None,
     adaptive_compute: bool = True,
 ) -> dict:
-    metrics = _runtime_delivery_metrics()
-    normalized_thread_id, normalized_prompt = _normalized_prompt_inputs(thread_id, prompt)
-    if not normalized_prompt:
-        return {
-            "reply": "",
-            "should_end": False,
-            "mood": "neutral",
-            "retry_count": 0,
-            "ttft_ms": 0,
-            "degraded_mode": "normal",
-            "queued": False,
-        }
-
-    max_attempts = max(1, int(os.environ.get("DADBOT_CHAT_RETRY_ATTEMPTS", "4") or 4))
-    base_backoff = max(0.15, float(os.environ.get("DADBOT_CHAT_RETRY_BASE_SECONDS", "0.45") or 0.45))
-    max_backoff = max(base_backoff, float(os.environ.get("DADBOT_CHAT_RETRY_MAX_SECONDS", "4.5") or 4.5))
-
     runtime = get_runtime()
-    bot = getattr(runtime.api, "_bot", None)
-    target_model = str(model_override or "").strip()
-    controls_payload = dict(turn_controls or {})
-    if adaptive_compute and not target_model:
-        target_model = _adaptive_model_for_prompt(bot, normalized_prompt)
-    model_overridden, previous_model = _apply_model_override(bot, target_model)
+    scope = streamlit_turn_lock(runtime.bot) if runtime.canonical_ui else nullcontext()
+    with scope:
+        metrics = _runtime_delivery_metrics()
+        normalized_thread_id, normalized_prompt = _normalized_prompt_inputs(thread_id, prompt)
+        if not normalized_prompt:
+            return {
+                "reply": "",
+                "should_end": False,
+                "mood": "neutral",
+                "retry_count": 0,
+                "ttft_ms": 0,
+                "degraded_mode": "normal",
+                "queued": False,
+            }
 
-    try:
-        metrics["sent"] = int(metrics.get("sent", 0) or 0) + 1
-        for attempt in range(1, max_attempts + 1):
-            if attempt > 1:
-                backoff = min(max_backoff, base_backoff * (2 ** (attempt - 2)))
-                st.session_state["runtime_reconnecting"] = True
-                st.session_state["runtime_last_error"] = str(st.session_state.get("runtime_last_error") or "")
-                time.sleep(backoff)
-            else:
-                st.session_state["runtime_reconnecting"] = False
+        max_attempts = max(1, int(os.environ.get("DADBOT_CHAT_RETRY_ATTEMPTS", "4") or 4))
+        base_backoff = max(0.15, float(os.environ.get("DADBOT_CHAT_RETRY_BASE_SECONDS", "0.45") or 0.45))
+        max_backoff = max(base_backoff, float(os.environ.get("DADBOT_CHAT_RETRY_MAX_SECONDS", "4.5") or 4.5))
 
-            started = time.perf_counter()
-            try:
-                runtime_result = runtime.send_user_message(
-                    thread_id=normalized_thread_id,
-                    content=normalized_prompt,
-                    attachments=attachments,
-                    metadata={
-                        **dict(message_metadata or {}),
-                        "turn_controls": controls_payload,
-                        "adaptive_compute": bool(adaptive_compute),
-                    },
-                )
-                elapsed_ms = max(1, int((time.perf_counter() - started) * 1000))
-                ttft = list(metrics.get("ttft_ms") or [])
-                ttft.append(elapsed_ms)
-                metrics["ttft_ms"] = ttft[-40:]
-                metrics["success"] = int(metrics.get("success", 0) or 0) + 1
-                metrics["retries"] = int(metrics.get("retries", 0) or 0) + max(0, attempt - 1)
-                st.session_state["runtime_reconnecting"] = False
-                st.session_state["runtime_last_retry_count"] = max(0, attempt - 1)
-                runtime_result = dict(runtime_result or {})
-                runtime_result["retry_count"] = max(0, attempt - 1)
-                runtime_result["ttft_ms"] = elapsed_ms
-                runtime_result["degraded_mode"] = "normal"
-                runtime_result["queued"] = False
-                runtime_result["temperature_style"] = str(temperature_style or "balanced")
-                runtime_result["active_model"] = str(
-                    target_model
-                    or getattr(bot, "LLM_MODEL", "")
-                    or "",
-                )
-                runtime_result["turn_controls"] = controls_payload
-                runtime_result["adaptive_compute"] = bool(adaptive_compute)
-                return runtime_result
-            except Exception as exc:
-                st.session_state["runtime_last_error"] = str(exc)
-                if attempt >= max_attempts:
-                    raise
+        bot = getattr(runtime.api, "_bot", None)
+        target_model = str(model_override or "").strip()
+        controls_payload = dict(turn_controls or {})
+        if adaptive_compute and not target_model:
+            target_model = _adaptive_model_for_prompt(bot, normalized_prompt)
+        model_overridden, previous_model = _apply_model_override(bot, target_model)
 
-    except Exception as exc:
-        metrics["failed"] = int(metrics.get("failed", 0) or 0) + 1
-        metrics["dropouts"] = int(metrics.get("dropouts", 0) or 0) + 1
-        st.session_state["runtime_reconnecting"] = True
-        record_runtime_rejection(exc, action="process_prompt_via_runtime")
-        return _fallback_runtime_result(
-            normalized_thread_id=normalized_thread_id,
-            temperature_style=temperature_style,
-            target_model=target_model,
-            max_attempts=max_attempts,
-            exc=exc,
-        )
-    finally:
-        _restore_model_override(bot, previous_model, model_overridden)
+        try:
+            metrics["sent"] = int(metrics.get("sent", 0) or 0) + 1
+            for attempt in range(1, max_attempts + 1):
+                if attempt > 1:
+                    backoff = min(max_backoff, base_backoff * (2 ** (attempt - 2)))
+                    st.session_state["runtime_reconnecting"] = True
+                    st.session_state["runtime_last_error"] = str(st.session_state.get("runtime_last_error") or "")
+                    time.sleep(backoff)
+                else:
+                    st.session_state["runtime_reconnecting"] = False
+
+                started = time.perf_counter()
+                try:
+                    runtime_result = runtime.send_user_message(
+                        thread_id=normalized_thread_id,
+                        content=normalized_prompt,
+                        attachments=attachments,
+                        metadata={
+                            **dict(message_metadata or {}),
+                            "turn_controls": controls_payload,
+                            "adaptive_compute": bool(adaptive_compute),
+                        },
+                    )
+                    elapsed_ms = max(1, int((time.perf_counter() - started) * 1000))
+                    ttft = list(metrics.get("ttft_ms") or [])
+                    ttft.append(elapsed_ms)
+                    metrics["ttft_ms"] = ttft[-40:]
+                    metrics["success"] = int(metrics.get("success", 0) or 0) + 1
+                    metrics["retries"] = int(metrics.get("retries", 0) or 0) + max(0, attempt - 1)
+                    st.session_state["runtime_reconnecting"] = False
+                    st.session_state["runtime_last_retry_count"] = max(0, attempt - 1)
+                    runtime_result = dict(runtime_result or {})
+                    runtime_result["retry_count"] = max(0, attempt - 1)
+                    runtime_result["ttft_ms"] = elapsed_ms
+                    runtime_result["degraded_mode"] = "normal"
+                    runtime_result["queued"] = False
+                    runtime_result["temperature_style"] = str(temperature_style or "balanced")
+                    runtime_result["active_model"] = str(
+                        target_model
+                        or getattr(bot, "LLM_MODEL", "")
+                        or "",
+                    )
+                    runtime_result["turn_controls"] = controls_payload
+                    runtime_result["adaptive_compute"] = bool(adaptive_compute)
+                    return runtime_result
+                except Exception as exc:
+                    st.session_state["runtime_last_error"] = str(exc)
+                    if attempt >= max_attempts:
+                        raise
+
+        except Exception as exc:
+            metrics["failed"] = int(metrics.get("failed", 0) or 0) + 1
+            metrics["dropouts"] = int(metrics.get("dropouts", 0) or 0) + 1
+            st.session_state["runtime_reconnecting"] = True
+            record_runtime_rejection(exc, action="process_prompt_via_runtime")
+            return _fallback_runtime_result(
+                normalized_thread_id=normalized_thread_id,
+                temperature_style=temperature_style,
+                target_model=target_model,
+                max_attempts=max_attempts,
+                exc=exc,
+            )
+        finally:
+            _restore_model_override(bot, previous_model, model_overridden)
+        raise RuntimeError("Runtime retry loop ended without a response")
 
 
 def emit_voice_runtime_ledger_event(event_type: str, payload: dict) -> None:

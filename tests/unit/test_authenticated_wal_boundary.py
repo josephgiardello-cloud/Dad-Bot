@@ -93,12 +93,17 @@ def test_raw_backend_enforces_current_delegation_when_context_exists(tmp_path, a
             tenant_id="tenant-a", expected_revision=0, operation_id="first", state={"memory": "private"}
         )
         assert backend.load() == [event]
+        digest, snapshot = backend.load_if_changed(None)
+        assert snapshot == [event]
+        assert backend.load_if_changed(digest) == (digest, [event])
     finally:
         _execution_authority.reset(token)
     token = _execution_authority.set((store, tasks["tenant-b"]))
     try:
         with pytest.raises(AuthorizationError, match="tenant mismatch"):
             backend.load()
+        with pytest.raises(AuthorizationError, match="tenant mismatch"):
+            backend.load_if_changed(digest)
         with pytest.raises(AuthorizationError, match="tenant mismatch"):
             backend.append(event, committed=True)
     finally:
@@ -109,9 +114,35 @@ def test_raw_backend_enforces_current_delegation_when_context_exists(tmp_path, a
         with pytest.raises(AuthorizationError, match="revoked"):
             backend.load()
         with pytest.raises(AuthorizationError, match="revoked"):
+            backend.load_if_changed(digest)
+        with pytest.raises(AuthorizationError, match="revoked"):
             backend.append(event, committed=True)
     finally:
         _execution_authority.reset(token)
+
+
+def test_trusted_local_append_prefix_never_bypasses_delegated_event_checks(tmp_path, authority):
+    store, tasks = authority
+    path = tmp_path / "wal"
+    backend = FileWALLedgerBackend(path)
+    ledger = ExecutionLedger(backend)
+    ledger.commit_tenant_memory(
+        tenant_id="tenant-a", expected_revision=0, operation_id="first", state={"memory": "private"}
+    )
+    assert backend._append_verifier._snapshot is not None
+    event = {
+        "type": "TEST", "tenant_id": "tenant-b", "session_id": "same-session", "trace_id": "test",
+        "kernel_step_id": "test", "timestamp": "2026-01-01", "payload": {},
+    }
+    ledger._seal_payload_hash_chain(event, ledger.get_next_sequence())
+    before = path.read_bytes()
+    token = _execution_authority.set((store, tasks["tenant-b"]))
+    try:
+        with pytest.raises(AuthorizationError, match="tenant mismatch"):
+            backend.append(event, committed=True)
+    finally:
+        _execution_authority.reset(token)
+    assert path.read_bytes() == before
 
 
 def test_fresh_process_with_different_tenant_cannot_read_raw_backend(tmp_path, authority):

@@ -7,6 +7,7 @@ from types import SimpleNamespace
 
 import pytest
 
+from dadbot.contracts import DadBotContext
 from dadbot.core.control_plane_projection import ExecutionProjection
 from dadbot.core.execution_context import ExecutionTraceRecorder, RuntimeTraceViolation, bind_execution_trace
 from dadbot.core.execution_ledger import ExecutionLedger
@@ -104,6 +105,100 @@ def test_persistence_events_are_ledger_authoritative(tmp_path: Path):
     assert any(str(event.get("type") or "") == "TURN_EVENT" for event in ledger.read())
     assert any(str(event.get("type") or "") == "GRAPH_CHECKPOINT" for event in ledger.read())
     assert any(str(event.get("event_type") or "") == "phase_transition" for event in events)
+
+
+@pytest.mark.parametrize(
+    "operation",
+    [
+        "latest_checkpoint",
+        "lifecycle_projection",
+        "execution_id",
+        "session_id",
+        "turn_events",
+        "policy_events",
+        "load_checkpoint",
+    ],
+)
+def test_persistence_lookups_do_not_copy_unrelated_state(
+    operation: str, monkeypatch: pytest.MonkeyPatch, tmp_path: Path,
+):
+    from dadbot.core import execution_ledger
+
+    ledger = ExecutionLedger()
+    manager = ConversationPersistenceManager(DadBotContext(_FakeBot(ledger, tmp_path)))
+    recorder = ExecutionTraceRecorder(trace_id="selective-read", prompt="selective-read")
+    with bind_execution_trace(recorder, required=True):
+        manager.persist_turn_event(
+            {
+                "event_type": "PolicyTraceEvent",
+                "trace_id": "selective-read",
+                "stage": "safety",
+                "status": "after",
+                "payload": {"action": "passthrough", "policy": "safety"},
+            },
+        )
+        manager.persist_turn_event(
+            {
+                "event_type": "phase_transition",
+                "trace_id": "selective-read",
+                "phase": "ACT",
+            },
+        )
+        manager.persist_graph_checkpoint(
+            {
+                "trace_id": "selective-read",
+                "stage": "save",
+                "status": "after",
+                "state": {"safe_result": "ok"},
+                "metadata": {"determinism": {"lock_hash": "selective-lock"}},
+            },
+        )
+        manager.claim_execution_handoff("selective-read", worker_id="worker-a", lease_seconds=15)
+        ledger.write(
+            {
+                "type": "SESSION_STATE_UPDATED",
+                "session_id": "unrelated-session",
+                "trace_id": "unrelated-trace",
+                "timestamp": "2026-01-01T00:00:00",
+                "kernel_step_id": "unrelated-state",
+                "payload": {"state": {"large_history": ["unused"] * 100}},
+            },
+        )
+        lookups = {
+            "latest_checkpoint": lambda: manager._latest_checkpoint_for_trace(
+                "selective-read", session_id="default",
+            ),
+            "lifecycle_projection": lambda: manager._lifecycle_projection().snapshot(),
+            "execution_id": lambda: manager._resolve_execution_id_for_trace("selective-read"),
+            "session_id": lambda: manager._resolve_session_id_for_trace("selective-read"),
+            "turn_events": lambda: manager.list_turn_events("selective-read"),
+            "policy_events": lambda: manager.list_policy_trace_events(trace_token="selective-read"),
+            "load_checkpoint": lambda: manager.load_latest_graph_checkpoint("selective-read"),
+        }
+        original_read = ledger.read
+        with monkeypatch.context() as full_read_patch:
+            full_read_patch.setattr(
+                ledger, "read", lambda full=True, **_selection: original_read(full=full),
+            )
+            expected = lookups[operation]()
+        original_copy = execution_ledger.deepcopy
+        copied_lists = []
+
+        def require_selected_copy(value):
+            if isinstance(value, list):
+                copied_lists.append(value)
+                assert not any(
+                    event.get("type") == "SESSION_STATE_UPDATED" and "payload" in event
+                    for event in value
+                ), "Unrelated session-state payload copied during lookup"
+            return original_copy(value)
+
+        monkeypatch.setattr(execution_ledger, "deepcopy", require_selected_copy)
+        assert lookups[operation]() == expected
+        assert copied_lists
+        ledger._backend_uncertain = True
+        with pytest.raises(RuntimeError, match="reload"):
+            lookups[operation]()
 
 
 def test_graph_checkpoint_ledger_event_carries_session_state_snapshot(tmp_path: Path):

@@ -12,6 +12,7 @@ from dadbot.config import DadBotConfig
 from dadbot.config_schema import ConfigSchema
 from dadbot.context import ContextBuilder
 from dadbot.core.execution_boundary import ModelGatewayScope
+from dadbot.core.execution_ledger import ExecutionLedger
 from dadbot.core.turn_mixin import DadBotTurnMixin
 from dadbot.managers import runtime_client as runtime_client_module
 from dadbot.managers.runtime_client import RuntimeClientManager
@@ -220,7 +221,8 @@ def test_mcp_approval_is_stored_for_the_active_streamlit_thread(monkeypatch):
         _streamlit_active_thread_id="streamlit-thread",
         ACTIVE_MODEL=DEFAULT_MODEL,
         prompt_assembly=SimpleNamespace(build_request_system_prompt=lambda *_args: "Dad persona"),
-        config=SimpleNamespace(active_model=DEFAULT_MODEL),
+        config=SimpleNamespace(active_model=DEFAULT_MODEL, tenant_id="tenant-mcp-test"),
+        _execution_ledger=ExecutionLedger(),
         model_port=SimpleNamespace(generate=lambda *_args, **_kwargs: ""),
     )
     service = MCPApprovalService(bot)
@@ -573,8 +575,9 @@ def test_chat_approval_blocks_input_and_validates_result(bot, monkeypatch, appro
     resolved = []
     normalized = []
 
-    async def resolve(thread_id, *, approved):
+    async def resolve(thread_id, *, approved, request_id):
         nonlocal pending
+        assert request_id == pending.request_id
         resolved.append((thread_id, approved))
         pending = None
         return "  Action completed.  " if approved else "  Action rejected.  "
@@ -584,9 +587,12 @@ def test_chat_approval_blocks_input_and_validates_result(bot, monkeypatch, appro
         return ReplyFinalizationManager.normalize_reply(reply)
 
     registry = bot.services.registry
+    from dadbot.runtime.mcp.approval_service import MCPApprovalService
+
     registry.register("mcp_tool_service", SimpleNamespace(
         get_pending_mcp_approval=lambda _thread_id: pending,
         resolve_mcp_approval=resolve,
+        decision_text=MCPApprovalService.decision_text,
     ))
     test_bot = bot
     monkeypatch.setattr(test_bot.reply_finalization, "normalize_reply", normalize)
@@ -604,6 +610,10 @@ def test_chat_approval_blocks_input_and_validates_result(bot, monkeypatch, appro
     assert len(normalized) == 1
     expected = "Action completed." if approved else "Action rejected."
     assert app.session_state["chat_threads"]["default"][-1]["text"] == expected
+    assert (
+        app.session_state["chat_threads"]["default"][-2]["text"]
+        == MCPApprovalService.decision_text(approved=approved)
+    )
     assert app.chat_input
 
 

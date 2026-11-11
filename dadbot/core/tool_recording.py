@@ -15,6 +15,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import math
 from dataclasses import asdict, dataclass, field
 from typing import Any
 
@@ -41,7 +42,8 @@ class ToolIORecord:
         input_payload: Raw parameters passed to tool
         output_payload: Actual tool output (return value)
         output_hash: Stable hash of output_payload
-        status: "ok" | "error" | "partial" | "replayed" | "degraded"
+        status: "succeeded" | "cached" | "failed" | "uncertain" | "replayed";
+            legacy records may also use "ok", "partial", or "degraded"
         latency_ms: Wall-clock latency of the execution
         error: Error message if status == "error", else ""
         metadata: Optional additional context (permissions, retry count, etc.)
@@ -64,7 +66,7 @@ class ToolIORecord:
 
     def is_success(self) -> bool:
         """True if execution succeeded (status ok/partial/cached/replayed)."""
-        return self.status in {"ok", "partial", "cached", "replayed"}
+        return self.status in {"succeeded", "ok", "partial", "cached", "replayed"}
 
     def matches_request(self, tool_name: str, input_hash: str) -> bool:
         """True if this record matches a given tool request."""
@@ -219,6 +221,40 @@ class ToolIOLedger:
     def is_empty(self) -> bool:
         """True if no tool calls have been recorded."""
         return len(self.records) == 0
+
+    @classmethod
+    def from_checkpoint(cls, data: Any) -> ToolIOLedger:
+        """Reject lossy or corrupt durable IO instead of skipping invalid records."""
+        if not isinstance(data, dict) or not isinstance(data.get("records"), list):
+            raise ValueError("Recorded tool IO has an invalid ledger shape")
+        if any(type(data.get(key)) is not int for key in ("sequence_count", "successful_count", "failed_count")):
+            raise ValueError("Recorded tool IO has invalid ledger counts")
+        try:
+            json.dumps(data, allow_nan=False)
+            ledger = cls.from_dict(data)
+            if ledger.to_dict() != data:
+                raise ValueError("Recorded tool IO cannot be restored without data loss")
+            for record in ledger.records:
+                if (
+                    type(record.sequence) is not int or record.sequence < 1
+                    or not isinstance(record.input_payload, dict)
+                    or not isinstance(record.output_payload, dict)
+                    or not isinstance(record.metadata, dict)
+                    or not isinstance(record.latency_ms, (int, float))
+                    or not math.isfinite(record.latency_ms) or record.latency_ms < 0
+                    or not all(
+                        isinstance(value, str) and value
+                        for value in (record.tool_name, record.input_hash, record.output_hash, record.status)
+                    )
+                    or _stable_payload_hash(
+                        {"tool_name": record.tool_name, "parameters": record.input_payload},
+                    ) != record.input_hash
+                    or _stable_payload_hash(record.output_payload) != record.output_hash
+                ):
+                    raise ValueError("Recorded tool IO has invalid fields or payload hashes")
+            return ledger
+        except (TypeError, ValueError) as exc:
+            raise ValueError("Recorded tool IO failed checkpoint validation") from exc
 
     def last_record(self) -> ToolIORecord | None:
         """Return the most recent tool IO record, or None if empty."""

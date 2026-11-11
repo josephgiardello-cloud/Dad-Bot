@@ -3,8 +3,11 @@ from __future__ import annotations
 import subprocess
 import sys
 import textwrap
+from types import SimpleNamespace
 
 import pytest
+
+from dadbot.core.compaction import EventCompactor
 
 pytestmark = pytest.mark.unit
 
@@ -34,6 +37,254 @@ async def test_submit_turn_triggers_ledger_compaction_report(monkeypatch, tmp_pa
     assert "compacted" in report
     assert "event_count" in report
     assert "lossless_proof" in report
+
+
+def test_noop_compaction_hashes_all_payloads_without_copying_history(monkeypatch) -> None:
+    from dadbot.core import execution_ledger
+
+    async def executor(_session, _job):
+        return ("ok", False)
+
+    plane = ExecutionControlPlane(
+        registry=SessionRegistry(), kernel_executor=executor,
+        options=ControlPlaneOptions(ledger=ExecutionLedger()),
+    )
+    plane._ledger_compactor = EventCompactor()
+    plane.ledger.write({
+        "type": "SESSION_STATE_UPDATED", "session_id": "s-1", "trace_id": "trace-1",
+        "kernel_step_id": "state", "timestamp": 1.0,
+        "payload": {"state": {"history": ["retained"] * 100}},
+    })
+    before = plane.ledger.read()
+    expected_digest = plane._event_stream_digest(before)
+    copied_lists = []
+    original_copy = execution_ledger.deepcopy
+
+    def capture_copy(value):
+        if isinstance(value, list):
+            copied_lists.append(value)
+        return original_copy(value)
+
+    with monkeypatch.context() as patch:
+        patch.setattr(execution_ledger, "deepcopy", capture_copy)
+        report = plane._maybe_compact_ledger()
+    assert not copied_lists, "Disabled built-in compaction must not copy historical payloads"
+    assert report["reason"] == "durable_checkpoint_required"
+    assert report["lossless_proof"] == {
+        "contract_version": "ledger-compaction-lossless-v1",
+        "equivalent": True,
+        "pre_digest": expected_digest,
+        "reconstructed_digest": expected_digest,
+        "archived_event_count": 0,
+        "reconstructed_event_count": len(before),
+        "sequence_equivalent": True,
+    }
+    assert report["partition_count"] == 1
+    assert report["top_partitions"] == [{"session_id": "s-1", "event_count": 1}]
+    assert plane.ledger.read() == before
+
+
+@pytest.mark.parametrize("change", ["append", "replace", "uncertain"])
+def test_digest_only_compaction_snapshot_revalidates_changed_heads(monkeypatch, change) -> None:
+    async def executor(_session, _job):
+        return "ok", False
+
+    ledger = ExecutionLedger()
+    plane = ExecutionControlPlane(
+        registry=SessionRegistry(), kernel_executor=executor, options=ControlPlaneOptions(ledger=ledger),
+    )
+    plane._ledger_compactor = EventCompactor()
+    event = {
+        "type": "SESSION_STATE_UPDATED", "session_id": "s-1", "trace_id": "trace-1",
+        "kernel_step_id": "state", "timestamp": 1.0, "payload": {"state": {"value": 1}},
+    }
+    ledger.write(event)
+    before = ledger.read()
+    telemetry = ledger.telemetry_snapshot
+    calls = 0
+
+    def change_head_during_noop():
+        nonlocal calls
+        calls += 1
+        result = telemetry()
+        if calls == 3:
+            if change == "append":
+                ledger.write({**event, "payload": {"state": {"value": 2}}})
+            elif change == "replace":
+                replacement = ExecutionLedger()
+                replacement.write({**event, "payload": {"state": {"value": 2}}})
+                ledger._backend._events = replacement.read()
+                ledger.load_from_backend()
+            else:
+                ledger._backend_uncertain = True
+        return result
+
+    monkeypatch.setattr(ledger, "telemetry_snapshot", change_head_during_noop)
+    if change == "uncertain":
+        with pytest.raises(RuntimeError, match="reload"):
+            plane._maybe_compact_ledger()
+    else:
+        report = plane._maybe_compact_ledger()
+        after = ledger.read()
+        assert report["lossless_proof"]["pre_digest"] == plane._event_stream_digest(before)
+        assert report["lossless_proof"]["reconstructed_digest"] == plane._event_stream_digest(after)
+        assert report["lossless_proof"]["reconstructed_event_count"] == len(after)
+
+
+@pytest.mark.parametrize(
+    "view", ["custom_ledger", "filtered", "authenticated", "custom_digest", "custom_partition", "class_compactor"],
+)
+def test_digest_only_compaction_preserves_full_snapshot_for_other_views(monkeypatch, view) -> None:
+    from dadbot.core import execution_ledger
+
+    class CustomLedger(ExecutionLedger):
+        pass
+
+    async def executor(_session, _job):
+        return "ok", False
+
+    ledger = CustomLedger() if view == "custom_ledger" else ExecutionLedger()
+    if view == "filtered":
+        ledger.add_replay_filter(lambda events: events)
+    elif view == "authenticated":
+        ledger.require_authenticated_authority()
+    plane = ExecutionControlPlane(
+        registry=SessionRegistry(), kernel_executor=executor, options=ControlPlaneOptions(ledger=ledger),
+    )
+    plane._ledger_compactor = EventCompactor()
+    if view in {"custom_digest", "custom_partition"}:
+        method = "_event_stream_digest" if view == "custom_digest" else "_partition_summary"
+        original = getattr(plane, method)
+
+        def overridden(events):
+            return original(events)
+
+        monkeypatch.setattr(plane, method, overridden)
+    elif view == "class_compactor":
+        original_compact = EventCompactor.compact
+
+        def overridden_compact(self, **kwargs):
+            return original_compact(self, **kwargs)
+
+        monkeypatch.setattr(EventCompactor, "compact", overridden_compact)
+    ledger.write({
+        "type": "SESSION_STATE_UPDATED", "session_id": "s-1", "trace_id": "trace-1",
+        "kernel_step_id": "state", "timestamp": 1.0, "payload": {"state": {"value": 1}},
+    })
+    before = ledger.read()
+    copied_lists = []
+    original_copy = execution_ledger.deepcopy
+
+    def capture_copy(value):
+        if isinstance(value, list):
+            copied_lists.append(original_copy(value))
+        return original_copy(value)
+
+    with monkeypatch.context() as patch:
+        patch.setattr(execution_ledger, "deepcopy", capture_copy)
+        report = plane._maybe_compact_ledger()
+    assert copied_lists == [before]
+    assert report["lossless_proof"]["pre_digest"] == plane._event_stream_digest(before)
+
+
+@pytest.mark.parametrize("change", ["append", "replace", "uncertain", "custom"])
+def test_compaction_snapshot_reuse_requires_unchanged_builtin_head(monkeypatch, change) -> None:
+    from dadbot.core import execution_ledger
+
+    async def executor(_session, _job):
+        return ("ok", False)
+
+    plane = ExecutionControlPlane(registry=SessionRegistry(), kernel_executor=executor)
+    event = {
+        "type": "SESSION_STATE_UPDATED", "session_id": "s-1", "trace_id": "trace-1",
+        "kernel_step_id": "state", "timestamp": 1.0, "payload": {"state": {"value": 1}},
+    }
+    plane.ledger.write(event)
+    before = plane.ledger.read()
+
+    class CustomCompactor(EventCompactor):
+        pass
+
+    compactor = CustomCompactor() if change == "custom" else EventCompactor()
+    plane._ledger_compactor = compactor
+    original_compact = compactor.compact
+
+    def change_head(**kwargs):
+        report = original_compact(**kwargs)
+        if change == "append":
+            plane.ledger.write({**event, "payload": {"state": {"value": 2}}})
+        elif change == "replace":
+            replacement = ExecutionLedger()
+            replacement.write({**event, "payload": {"state": {"value": 2}}})
+            plane.ledger._backend._events = replacement.read()
+            plane.ledger.load_from_backend()
+        elif change == "uncertain":
+            plane.ledger._backend_uncertain = True
+        return report
+
+    monkeypatch.setattr(compactor, "compact", change_head)
+    original_copy = execution_ledger.deepcopy
+    copied_lists = []
+
+    def capture_copy(value):
+        if isinstance(value, list):
+            copied_lists.append(original_copy(value))
+        return original_copy(value)
+
+    with monkeypatch.context() as patch:
+        patch.setattr(execution_ledger, "deepcopy", capture_copy)
+        if change == "uncertain":
+            with pytest.raises(RuntimeError, match="reload"):
+                plane._maybe_compact_ledger()
+            return
+        report = plane._maybe_compact_ledger()
+    after = plane.ledger.read()
+    assert len(copied_lists) >= 2
+    assert copied_lists[0] == before
+    assert copied_lists[-1] == after
+    assert report["lossless_proof"]["pre_digest"] == plane._event_stream_digest(before)
+    assert report["lossless_proof"]["reconstructed_digest"] == plane._event_stream_digest(after)
+    assert report["lossless_proof"]["reconstructed_event_count"] == len(after)
+
+
+def test_job_trace_selection_does_not_copy_other_execution_payloads(monkeypatch) -> None:
+    from dadbot.core import execution_ledger
+
+    async def executor(_session, _job):
+        return ("ok", False)
+
+    plane = ExecutionControlPlane(registry=SessionRegistry(), kernel_executor=executor)
+    for trace, payload in [
+        (" trace-1 ", {"state": {"value": 1}}),
+        ("trace-other", {"job_id": " job-1 ", "result": "retained"}),
+        ("trace-other", {"state": {"large_history": ["unused"] * 100}}),
+    ]:
+        plane.ledger.write({
+            "type": "SESSION_STATE_UPDATED", "session_id": "s-1", "trace_id": trace,
+            "kernel_step_id": "state", "timestamp": 1.0, "payload": payload,
+        })
+    before = plane.ledger.read()
+    job = SimpleNamespace(trace_id="trace-1", job_id="job-1")
+    expected = before[:2]
+    original_copy = execution_ledger.deepcopy
+    copied_lists = []
+
+    def require_selected_copy(value):
+        if isinstance(value, list):
+            copied_lists.append(value)
+            assert value == expected, "Other execution payloads copied before trace selection"
+        return original_copy(value)
+
+    with monkeypatch.context() as patch:
+        patch.setattr(execution_ledger, "deepcopy", require_selected_copy)
+        selected = plane._job_trace_events(job)
+    assert selected == expected
+    assert copied_lists
+    selected[0]["payload"]["state"]["value"] = 99
+    assert plane.ledger.read() == before
+    plane.ledger._backend_uncertain = True
+    with pytest.raises(RuntimeError, match="reload"):
+        plane._job_trace_events(job)
 
 
 def test_distributed_runtime_authority_rejects_split_brain_claim_path() -> None:

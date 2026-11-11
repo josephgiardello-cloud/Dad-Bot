@@ -4,37 +4,6 @@ A warm, private AI companion with long-term memory that remembers you, grows wit
 
 **Local processing is available.** Ollama chat, local memory, local STT, and Piper TTS can run on your machine. Auto voice may use edge-tts or ElevenLabs and send reply text to external services; choose Piper or pyttsx3 for local speech.
 
-Ollama chat clients use a 120-second transport timeout (including waiting for
-response headers or the next stream chunk). Separately, submitted turns default
-to a 120-second cooperative execution deadline; an explicit per-turn timeout
-overrides it. The synchronous turn lock and async thread bridge stop waiting
-after 180 seconds. Cancellation cannot forcibly stop a synchronous worker;
-the transport timeout still bounds network inactivity. A five-second health
-probe may time out during a normal cold model load.
-
-Factual turns such as `2+2` skip model-based mood detection when neither the
-message nor a relevant emotional follow-up contains emotional signals. They also skip
-tool planning without tool intent. Emotional messages, attachments, tool-name
-keywords, and contextual tool follow-ups remain eligible. The same planning
-gate applies to a configured Home Assistant MCP service; it never bypasses
-approval for an actual action. Answer generation remains on the canonical graph.
-
-Emotional chat turns classify mood and generate the supportive answer in one
-validated JSON request (Ollama thinking disabled); only the reply reaches the UI. Mood is committed once
-at the normal save boundary. An optional family reference shares that request.
-Direct-answer and empathy-first strategies retain critique diagnostics and
-safety checks but do not generate a second answer for critique revisions.
-
-Enable INFO logging for `dadbot.managers.runtime_client` to see per-purpose
-Ollama durations measured with `time.perf_counter()`, prompt/generation token
-counts, and completion reasons without logging prompts or reasoning text.
-
-Tests construct isolated real managers and mock only inference/embedding
-boundaries. Retired command-dispatcher and natural-language reminder-splitter
-contracts have narrow, strict xfails with explicit reasons; the canonical
-`generate_candidate` contract remains tested, not xfailed. A supplied
-`DadBotConfig` is preserved through boot, including its tenant and storage paths.
-
 ---
 
 ## Why Dad-Bot?
@@ -54,340 +23,21 @@ contracts have narrow, strict xfails with explicit reasons; the canonical
 - 💭 **Relationship Modeling** — Understands trust, emotional momentum, and personal history
 - 🎤 **Voice Pipeline (Partial)** — Browser capture → local Whisper → canonical conversation runtime → local Piper reply is wired. Streaming playback, VAD turn detection, and hands-free barge-in are not yet certified.
 - 📜 **Oral History Capture** — Record or upload audio, review and correct the local transcript, then explicitly save it as an `oral_history` memory. The original audio is not retained.
-- 📅 **Calendar & Proactive Flows (Partial)** — Core reminder/check-in plumbing exists; full calendar-sync automation remains in progress
-- 📬 **Proactive Flows** — Daily check-in is fully supported; calendar sync and advanced scheduling are in development.
+- 📅 **Reminders & Calendar** — Local reminders and calendar events are available; feed sync and advanced proactive scheduling are still in development.
 - 🎨 **Avatar Support (Partial)** — Avatar rendering exists with fallback paths; generation workflows vary by environment
 - 📱 **Mobile-Friendly** — PWA works on phone browsers
 - 🔒 **Local modes available** — Auto voice may use cloud services; select a local backend for on-device speech
 
-The 200-question memory regression test uses an isolated, seeded 50-fact vault
-and requires at least 98% top-3 recall. The default test uses mocked embeddings;
-to also test real local `nomic-embed-text` embeddings, start Ollama, pull that
-model, set `DADBOT_RUN_REAL_EMBEDDING_BENCHMARK=1`, and run
-`python -m pytest tests\eval\test_memory_benchmark.py -s`. The questions are
-templated and repeat the fact topics; results do not measure production-vault
-or source-mode citation quality. The same opt-in run also includes a separate
-50-question engineering-authored paraphrase diagnostic against the synthetic
-facts. That diagnostic reports misses without pretending it meets the
-200-question regression gate.
+## Implementation Notes
 
-**Current real-model synthetic result:** 96% top-1 (48/50), 100% top-3
-(50/50) on the natural paraphrases with local Qwen reranking. The separate
-200 templated questions remain 200/200 on both metrics. These are not
-production-vault or approved-source accuracy claims.
+### Memory retrieval evaluation
 
-Semantic candidate search uses the current user query without synthetic
-personality/history labels; recent turns remain available to contextual
-scoring. This prevents metadata tokens from displacing query terms in the
-bounded candidate filter.
-
-General-memory retrieval now uses SQLite FTS5 BM25 for its lexical arm.
-FTS5 is required in the Python SQLite build; initialization/query errors
-propagate rather than silently reverting to word overlap. A private in-memory
-index backfills the current normalized tenant catalog on first use, rebuilds
-when its keys/text change, and closes at shutdown. No embedding job or saved
-lexical database is needed, including when semantic storage uses Postgres.
-There is no source-citation approval filtering on this conversational path;
-source mode remains a separate, approved-evidence-only retrieval contract.
-
-BM25's negative ranks are converted to positive scores and divided by the
-query's maximum match score. The lexical score averages that normalized BM25
-score with the fraction of meaningful query tokens present in the memory.
-The convex blend retains a 0.75 weight on the existing contextual dense score
-(semantic relevance, graph signal, importance, and recency) and 0.25 on the
-lexical score. This coverage component prevents a rare query term in one
-memory from suppressing other memories that match multiple common terms.
-Set `DADBOT_MEASURE_FUSION=1` alongside the real-embedding benchmark flag
-to sweep weights and report 160 training / 40 held-out questions, split by
-whole fact topic. With the coverage component and a corrected dense-component
-capture, real Nomic measured 200/200 top-1 and top-3 for all sampled dense
-weights from 0.0 through 0.9; dense-only measured 191/200 top-1 and 200/200
-top-3. Lexical-only also passed every question.
-This plateau does not identify a unique optimal weight: the templated
-questions favor lexical matching. Historical fusion sweeps below were recorded
-before the dense-component capture was corrected and are not comparable to
-the current sweep.
-
-The 25 natural paraphrases initially measured 19/25 top-1 and top-3.
-Diagnostic logging identified these pre-cosine exclusions in the SQLite path:
-
-| Target | Query example | Exclusion |
-| --- | --- | --- |
-| Favorite color | Which shade would I pick? | No selected token substring matched |
-| Preferred season | Which time of year do I enjoy most? | No selected token substring matched |
-| Wake-up time | When do I get out of bed on workdays? | Neither tokens nor inferred `work` category matched the routines entry |
-| Vacation destination | Where am I planning to go on holiday? | Neither tokens nor inferred `goals` category matched the travel entry |
-
-The query's neutral mood and general category were not active filters.
-The 108-row candidate limit did not cause these four exclusions in the
-50-fact vault, but could exclude older entries in larger catalogs.
-
-Conversational semantic search now fetches every indexed key in the supplied
-current catalog before exact cosine scoring, in both SQLite and pgvector.
-Only catalog membership gates this fetch: token, inferred category, mood,
-vector distance, and row-limit predicates do not. Missing indexed keys emit
-a coverage warning, rather than silently masquerading as relevance misses.
-Alignment/freshness and relevance remain scoring decisions; the output limit
-applies after scoring. The hybrid caller also retains the entire semantic
-result set until BM25 fusion, avoiding a second, lossy intermediate top-k.
-
-After both eligibility fixes, real Nomic measured 200/200 top-1 and top-3 on
-templates and 20/25 top-1, 22/25 top-3 on the original paraphrases at unchanged
-weight 0.75.
-All four previously excluded targets reach cosine scoring. Three remaining
-top-3 misses (season, bedtime routine, commute) have positive cosine and
-semantic scores but zero BM25, so these are now final-ranking cases, not
-pre-cosine exclusions. The small paraphrase split remains 20 training / 5
-held-out questions. At 0.75 it measures 17/20 training top-1, 19/20 top-3 and
-3/5 on both held-out metrics. Training alone selects dense-only in the latest
-sweep; that does not establish a safe replacement for the existing blend,
-which continues to pass the separate 200-question gate. The sweep verifies
-that replay at the current weight reproduces actual retrieval counts.
-
-The catalog-key fetch does not use vector ordering and cannot use HNSW for
-nearest-neighbor selection, even if an ANN index already exists on Postgres.
-The local configuration requests pgvector with no ANN index or fixed
-dimensions. Read-only inspection of the running Docker Postgres subsequently
-confirmed pgvector 0.8.2 and no HNSW/IVFFlat index on `semantic_memories`.
-Its database port is internal to Docker, not published on Windows; the host
-DSN's localhost:5432 timed out. This distinguishes the host configuration from
-the deployed Docker backend. No separate ANN replacement is needed for
-this conversational path. Other backend candidate APIs retain their existing
-filter semantics. Source mode remains separate and already scores every
-currently eligible approved source without query prefilters. Tests verify
-1,100 catalog keys across SQLite batches, catalog exclusion of unrelated rows,
-pgvector key-only SQL under all ANN configurations, facade scoring coverage,
-and scoring eligibility of 120 approved sources while excluding unapproved
-evidence. These are synthetic scoping checks, not a production-vault audit.
-
-The paraphrase diagnostic is now expanded to 50 questions, retaining the
-original 25 and adding one natural question for each remaining fact. Every
-synthetic fact has exactly one target question. The unchanged topic-held-out
-rule gives 40 training / 10 held-out questions; labels are not changed to
-hide retrieval failures. Real Nomic measured **41/50 top-1, 46/50 top-3**
-at weight 0.75, with identical rankings across Python hash seeds 0 and 1.
-Training measured 35/40 top-1 and 38/40 top-3; held-out measured 6/10 and
-8/10. Training-only selection chose weight 0.80, but held-out performance
-did not improve, so the production default remains 0.75.
-
-Per-stage diagnostic evidence distinguishes content absence from ranking:
-
-| Complete miss | Raw cosine rank | Fused rank before diversity | Cause |
-| --- | --- | --- | --- |
-| Preferred season | 1 | 4 | BM25 matches generic `time` in unrelated memories; expected memory has no sparse match |
-| Bedtime routine | 2 | 2 | Category diversification selects a different routines memory first |
-| Commute method | 3 | 2 | Category diversification selects a different work memory first |
-| Work project (new question) | 2 | 2 | Category diversification selects a different work memory first |
-
-All four expected facts exist in the normalized catalog and reach cosine
-scoring. None is a missing-content case; even the complete misses have
-their correct target in raw cosine top-3. They are fusion/selection failures.
-The one-per-category-first policy can exclude these same-category alternatives
-even with ten diversified candidates. All four targets are instead in the
-undiversified fused top-five pool.
-
-The 3+ consistent-ranking-miss criterion is met for a controlled margin-gated
-reranker experiment, not an established precision or latency improvement.
-Any experiment must use the **pre-diversification** candidate pool; reranking
-the final three sources cannot recover discarded evidence. Correcting the
-relevance-blind selection policy is also supported directly by these results
-and should be considered before paying for an extra model call. No reranker,
-automatic alpha change, or semantic cache is enabled by this diagnostic slice.
-
-Live backend parity was verified using an isolated container from the same
-pgvector 0.8.2 image as the running database, not the production vault.
-Both SQLite and Postgres independently index/search with real 768-dimensional
-Nomic vectors and return 41/50 top-1, 46/50 top-3 with identical full top-three
-ranking fingerprints across two hash seeds. The Postgres test additionally
-mirrors stored vectors into SQLite and asserts identical rankings for every
-question. To repeat it, provide a dedicated `DADBOT_TEST_POSTGRES_DSN` alongside
-the real-embedding and fusion-measurement flags. It creates/drops a unique
-synthetic benchmark table and fails on backend errors rather than falling back
-to SQLite. Install the declared `[service]` dependencies, including `pgvector`,
-for this path. This verifies current repository retrieval code on live
-Postgres, not a restart or upgrade of the running API image.
-
-### Membership-preserving diversification
-
-Category diversification now fixes the strongest distinct top-k set first,
-then places the first memory from each represented category ahead of repeated
-categories **within that set**. It never replaces a stronger memory with a
-weaker category merely to increase domain coverage. Deduplication still runs
-before selection, the highest-ranked distinct memory remains first, and no
-query-intent classifier is introduced. Retrieval confidence gaps use the
-two highest scores, not the reordered display's first two items. The same
-selector is shared by semantic retrieval and hybrid fusion.
-
-With unchanged alpha 0.75, real Nomic measures **41/50 top-1 and 47/50 top-3**,
-up from 41/50 and 46/50. Templates retain 200/200 on both metrics. These
-measured paraphrase floors are now enforced in the opt-in real tests, along
-with exact live Postgres/SQLite ranking parity. Rankings remain identical
-across two hash seeds. The original 25-question subset remains 20/25 top-1,
-22/25 top-3: recovering bedtime and commute also exposes wake-up and vacation
-targets that the former diversity filter had promoted over higher scores.
-The new work-project question is recovered, accounting for the net top-3 gain.
-
-The remaining complete misses are season, wake-up time, and vacation.
-Their raw-cosine targets are all rank 1. Season falls to fused rank 4 because
-BM25 rewards generic `time` matches elsewhere; wake-up falls to contextual
-dense/fused rank 4 and vacation to rank 5 because inferred `work`/`goals`
-categories penalize their routines/travel entries. Thus only one complete
-miss in the expanded 50 is BM25-driven, insufficient evidence to change
-global alpha or enable a confidence-based sparse cap. Inferred-category
-weighting is the next selected investigation. Reranking and semantic caching
-remain disabled. A future reranker must see undiversified top-five candidates
-before display diversification; it must not reuse display order to compute
-its ambiguity margin.
-
-### Inferred-category penalty removal
-
-The inferred-category mismatch multiplier is removed; tags no longer
-subtract from semantic relevance merely because the query classifier chose
-another domain. Before removal, wake-up and vacation received alignment
-0.55 (a 45% reduction), while season received 1.0. The existing recent-topic
-and mood alignment behavior is unchanged; no same-domain boost is introduced.
-
-At unchanged alpha 0.75, real Nomic now measures **43/50 top-1, 49/50 top-3**,
-with **22/25 top-1, 24/25 top-3** on the original subset. Templates retain
-200/200 on both metrics. These improved floors are enforced by the opt-in
-benchmark. Three focused broad-query fixtures retain their topical first
-result, but use controlled embeddings; they are not a labeled real-model
-broad-query evaluation or a general guarantee of no broad-query regressions.
-Real paraphrase ranking fingerprints match across two hash seeds and across
-SQLite/live Postgres, with full per-question parity asserted.
-
-Season is the sole complete miss: raw cosine 0.658126, cosine rank 1, fused
-rank 4. The opt-in sweep also evaluates alpha 0.85/0.90 only when the **raw**
-maximum cosine exceeds 0.85. That gate fires for 0/50 paraphrases and 0/200
-templates, yielding no improvement. Normalized dense rank scores near 1.0
-are not raw cosine confidence. The ineffective gate is not enabled; alpha
-remains 0.75 rather than lowering a threshold to fit one known question.
-Seven top-1 misses remain (six already in top-3); an undiversified-top-five
-reranker experiment is the next supported model-ranking investigation,
-not a claimed or enabled precision improvement. Semantic caching remains
-deferred.
-
-### Local Qwen reranker
-
-The fixed experiment uses **Qwen/Qwen3-Reranker-0.6B**, revision
-`e61197ed45024b0ed8a2d74b80b4d909f1255473`, with the published yes/no relevance
-protocol. It scores the five highest fused, distinct candidates **before**
-category reordering, only when the top-two fused-score gap is **less than
-0.15**. Skipped queries keep their baseline answer and do not call the model.
-Scores are not probabilities of truth. Conversational retrieval can enable
-this policy with `DADBOT_MEMORY_RERANKER_ENABLED=1` and
-`DADBOT_QWEN_RERANKER_PATH` pointing to the downloaded directory. Disabled
-deployments keep the existing retrieval behavior and never load the model.
-The model is shared across tenants/services within each process, with
-serialized inference and no query/evidence cache; candidates remain scoped
-by their calling service. It stays resident until process exit. CPU inference
-sets PyTorch's process-wide thread count to four.
-
-| Metric, 50 synthetic paraphrases | Baseline | Fixed gated reranker |
-| --- | --- | --- |
-| Top-1 | 43/50 | **48/50** |
-| Top-3 | 49/50 | **50/50** |
-| Train top-1 / top-3 | 37/40 / 39/40 | 39/40 / 40/40 |
-| Held-out top-1 / top-3 | 6/10 / 10/10 | 9/10 / 10/10 |
-| Gate fires | None | 39/50 (78%) |
-
-Rankings are identical across hash seeds 0 and 1. Six first-result errors
-are corrected, one previously correct first result regresses. The gate skips
-22% of questions, not most questions on this corpus. Measured on an
-Intel i9-14900K, CPU-only PyTorch 2.15.0, Transformers 4.57.6, float32,
-four threads and five-pair batches: gated median added time is about
-0.81 seconds, gated p95 about 0.86 seconds; mean added time over all queries
-is about 0.63 seconds, including skipped queries at zero. Model loading takes
-about 0.65 seconds and separate warm-up about 0.71-0.75 seconds in repeated
-runs. These exclude package imports/download and baseline embedding/retrieval
-time; they are not end-to-end conversation latency or GPU measurements.
-
-The 45/50 stop threshold is met; no further thresholds, prompts, or ranking
-weights were tuned. The remaining errors are **not demonstrated content
-gaps**: the synthetic weekend-hobby fact is in the candidate set but Qwen
-prefers a weekend chore, while the musical-instrument question is skipped
-because its fused margin is 0.219699. Both correct facts exist and remain
-in top-three. Real interview capture may clarify ambiguous questions, but
-this synthetic benchmark does not justify claiming missing personal facts.
-
-To reproduce, install the optional `[reranker]` dependencies. Download
-the public model at the fixed revision explicitly into a local directory
-using `huggingface_hub.snapshot_download`, requesting `config.json`,
-`model.safetensors`, `tokenizer.json`, `tokenizer_config.json`, `vocab.json`,
-and `merges.txt`. A regular-file `local_dir` avoids Windows symlink privilege
-requirements. Then set `DADBOT_QWEN_RERANKER_PATH` to that directory,
-`DADBOT_RUN_QWEN_RERANKER=1`, `DADBOT_RUN_REAL_EMBEDDING_BENCHMARK=1`,
-`HF_HUB_OFFLINE=1`, and run:
-
-```powershell
-python -m pytest tests\eval\test_memory_benchmark.py -k "real and paraphrase and sqlite" -s
-```
-
-The scorer loads local safetensors only, disables remote model code, refuses
-silent truncation above its 2048-token experiment limit, and reports model
-revision, gate rate, per-question candidates, recall changes, ranking
-fingerprint, and load/warm/additional latency separately. The experiment
-raises explicit errors if enabled without the model/dependencies; disabled
-tests and deployments do not load Qwen. No synthetic embedding fallback
-is permitted in the real benchmark.
-
-The conversational two-dimensional gate additionally skips when the fused
-top score is at least **1.0**. A measured threshold sweep found 0.8/0.85
-reduced top-1 to 45/50 and top-3 to 49/50; 0.9/0.95 produced 46/50 and 49/50.
-Only 1.0 preserved 48/50 and 50/50, saving one of 39 model calls (38/50 fire).
-This is a small latency optimization, not a calibrated truth-confidence
-score. The original one-dimensional experiment remains reproducible with
-`DADBOT_MEMORY_RERANKER_ENABLED=0`; enabled benchmark runs enforce the
-48/50 and 50/50 floors through the actual production retrieval route.
-
-Source mode uses the same local model only to reorder up to five **already
-approved, lexically eligible** excerpts. It keeps the 50% token-overlap
-refusal threshold, literal quotations, provenance, and fresh approval checks.
-API requests select it with `metadata: {"source_mode": true}`; workers
-preserve that explicit boolean at the turn boundary.
-Its scores are not comparable to fused conversational scores, so the fused
-confidence gate is not applied there. Final validation independently reranks
-current evidence rather than trusting the answer cache; gated source turns
-therefore pay for scoring again during validation. The conversational
-96%/100% result does not measure this distinct source policy.
-
-For the Windows UI, persist the two enable/path variables in your local
-environment and restart Streamlit. For the Docker API, the image includes
-the optional reranker dependencies; explicitly enable its read-only model
-mount with:
-
-```powershell
-docker compose -f docker-compose.yml -f docker-compose.reranker.yml --profile production up -d --build --no-deps dadbot-api
-```
-
-The override requires an existing `DADBOT_QWEN_RERANKER_PATH` directory.
-No automatic model download, remote model code, or silent scoring fallback
-is enabled. To disable the model for the UI, set the enable flag to `0`;
-for the API, recreate it using the base compose configuration only.
-Retrieval tuning stops here; semantic caching remains deferred.
-
-Source mode keeps a bounded, in-memory LRU cache of 64 exact normalized queries
-per service, scoped by tenant. Hits become most recently used; capacity
-evicts the least recently used answer. Each lookup reads current approved
-evidence and the full vault projection. Any canonical vault mutation or
-save attempt (even unchanged content), projection-content change, or approval
-revision invalidates all cached replies. This deliberately coarse policy
-also covers unrelated/unapproved memories, edits, deletion, and provenance
-changes, trading hit rate for conservative invalidation. Final citation
-validation bypasses the cache and recomputes the answer from current sources.
-The cache does not survive restart, persist transcripts separately, reuse
-semantically similar queries, or skip safety/approval validation. It avoids
-repeat ranking/formatting, not evidence reads; no end-to-end speedup is claimed.
-
-Reviewed oral histories save transcript evidence with a unique ID, UTC review
-time, and SHA-256 content hash alongside the memory; the transcript is stored
-both as memory text and as its evidence. Source-mode citation approval is separate.
-Missing or mismatched evidence disables citation, including for older oral-history
-memories saved before evidence was recorded; review and save those again to cite
-them. Deleting the memory deletes its attached evidence. A hash checks consistency,
-not the identity of the speaker, the truth of the account, or protection against tampering.
-Existing backups and other historical snapshots may still contain deleted evidence;
-this is not a secure-erasure guarantee.
+Retrieval evaluations use an isolated synthetic vault; they are not accuracy
+claims about production memories or source-mode citations. Real embeddings,
+reranker, and PostgreSQL cases are opt-in. The test harness is
+[`tests/eval/test_memory_benchmark.py`](tests/eval/test_memory_benchmark.py);
+setup and runtime configuration are summarized under
+[Memory retrieval and performance](#memory-retrieval-and-performance).
 
 ### Local service authority consistency
 
@@ -571,6 +221,20 @@ generation; validation failures remain explicit refusals, never device success.
 
 Every proposed MCP call pauses for explicit approval in the Chat page. The UI shows the exact tool name and validated arguments; each call in a multi-call plan requires a separate approval. Before an approved call is sent, Dad-Bot rechecks the live server's allowlist and input schema. Rejecting a call sends no request, and new chat input is held while an approval is pending in that conversation.
 
+The UI records proposals, decisions, dispatch starts, and outcomes in its canonical execution ledger, scoped by tenant, thread, trace, and approval ID. Approval audit events store input/output hashes, not raw arguments or tool results. A proposal or pre-dispatch audit failure blocks the action. A timeout, cancellation, tool error, or missing completion record after dispatch leaves an uncertain outcome; it is never automatically retried. Pending and approved-but-undispatched proposals expire when the runtime restarts; an interrupted dispatched call becomes uncertain rather than being sent again. An in-memory execution ledger does not make these records durable across process exit.
+
+Approved MCP dispatch now uses the kernel's `execute_tool_async` entrypoint, sharing IO recording, scoped/versioned replay validation, live authority checks, and structured audit with synchronous tools. It awaits in the caller's task and does not use the synchronous sandbox's global cache: identical arguments under a new approval represent a new action. Successfully completed calls have separate committed `TOOL_IO_RECORDED` receipts containing the full inputs/results for exact local replay. These records can contain private external-service data; protect the execution ledger and its backups and never commit them to source control. The hash-only approval completion references its IO receipt. Both writes must complete before success is recorded.
+
+`ToolApprovalJournal.replay` returns only a durably successful receipt through kernel replay, validating tenant/thread/trace/approval identity, payload hashes, tool contract version, and environment fingerprint. Graph-dispatched receipts additionally bind the actual continuation trace/request; replay requires a matching `turn_context` for that execution scope. It never connects to the external service, sends an action, or replays an uncertain outcome. Missing or incompatible receipts fail explicitly without live fallback. Pending approvals still expire after restart.
+
+Approve/reject clicks now submit a new canonical continuation turn linked to the original proposal trace and exact approval ID. The original proposal job is already complete and is not reopened. The decision and result appear in conversation history; the continuation runs context, safety, reflection and SaveNode, producing its own job, policy trace and checkpoint. It bypasses fresh tool planning and ordinary chat inference. Changed configuration expires the proposal inside that graph path; stale buttons cannot authorize a replacement proposal. Source mode disables approval decisions. Successful dispatch and uncertain outcomes both retain their kernel IO in canonical checkpoints; normalization, thinning, loading and recovery preserve it, and corrupt IO fails explicitly rather than becoming an empty replay ledger. Checkpoint replay requires the matching recorded decision result and never dispatches the external action.
+
+The Workshop's **Home Assistant action review** projects a tenant/thread-scoped durable action history and an unresolved-uncertainty queue from the canonical ledger. It shows approval identity, recorded outcome, user confirmation and retry policy without exposing full tool receipts. After checking the original proposal and the provider's action history, users can explicitly record that an uncertain action happened or did not happen. A current device state alone does not prove either outcome. Review is a new canonical no-dispatch continuation turn with conversation history, safety audit and checkpoint. Its separate committed `TOOL_ACTION_REVIEWED` event binds the exact uncertain-outcome event and original approval to the review trace/request.
+
+Manual review is labeled `user_confirmation`, not provider verification or tool success. The original `uncertain` status never changes and cannot authorize receipt replay or resend. Conflicting confirmations and stale selections fail explicitly; identical repeated confirmations do not duplicate the audit event. Unreviewed uncertainty requires manual review; confirmed performance and durable success must not be repeated; a confirmed absence, rejection or expired undispatched proposal requires a new proposal and approval before any new action. Started actions must await completion without retry. Source mode disables review. Confirmations survive WAL recovery, while a failed/uncertain ledger append blocks review reads until explicit backend recovery and verification. Pending approvals still expire after restart.
+
+This completes graph-routed UI approval continuations, local IO retention and durable manual reconciliation, not all tool orchestration: provider-verified reconciliation, automatic/durable retry workers, multi-process boot-to-resume certification, and live calendar/Home Assistant/notification acceptance remain separate work. The review queue never schedules or sends an external action. A failed approval continuation may have sent its approved action, so the UI reports the failure and does not enqueue an automatic resend. A failed review continuation reports that its confirmation may already be recorded and requires checking ledger history before retrying. Each explicitly submitted review gets a distinct conversation-attempt identity, so a failed no-dispatch attempt does not permanently block subsequent user review; journal confirmation remains idempotent by original approval/outcome identity. This does not change approval dispatch deduplication or permit replay of an ambiguous external effect. The standalone low-level MCP client helpers remain compatible; the UI approval service owns this journaled boundary.
+
 The MCP loop returns the model's validated final answer, prompted in the Dad persona, rather than raw tool payloads or unparsed plans. If model finalization fails after tool execution, it reports that failure and warns that device actions may already have occurred; it does not claim success or fall back to a "no action performed" reply. This protection does not depend on Streamlit reply normalization.
 
 ### Authenticated local MCP server
@@ -669,13 +333,27 @@ No sanitized product screenshots are currently included. Capture demo views usin
 
 ### Local chat model and streaming
 
-The default chat model is `qwen3.5:9b`. Explicit model selections and generation options are preserved; the runtime does not disable thinking or override the context window. Actual GPU usage and latency depend on the model, prompt, attachments, and other running applications.
+The default chat model is `qwen3.5:9b`. Explicit model selections and generation options are preserved. Set `DADBOT_OLLAMA_CHAT_THINK=false` before startup to disable thinking for ordinary Ollama chat; unset or `auto` preserves the model default, and `true` enables thinking. Explicit per-call settings win, and this default does not change safety, planning, or reflection calls. Actual GPU usage and latency depend on the model, prompt, attachments, and other running applications.
 
 Existing profile model choices are not overwritten. If a saved profile selects another model, update its `llm.model` field to `qwen3.5:9b` and restart the app. `DADBOT_LLM_MODEL` can set the default; CLI `--model` and service `DADBOT_DEFAULT_MODEL` overrides remain available.
 
 Chat, Status probes, Workshop probes, and outbox retries call the canonical `process_user_message` entrypoint and validate replies through shared reply finalization. Chat displays, saves, and speaks only the finalized reply; it does not run a separate UI model executor or expose planning JSON as drafts. New chat and Duplicate controls are in the main chat column, and the conversation selector follows the new thread.
 
 The Streamlit runtime boots orchestration services into the bot's existing manager registry, then registers its UI adapters there. The service container, orchestrator, graphs, and persistence aliases share that registry. `ServiceRegistry.boot()` creates a new registry by default; passing `registry=existing` populates and returns that exact instance.
+
+Streamlit retains the canonical safety and maintenance services, including their `safety` and `health` aliases. Ordinary turns run scheduled proactive jobs; source mode skips them. Maintenance failures are logged and reported as degraded, not always-OK ticks. Durable synthesis remains post-commit, never part of the health hot path.
+
+Its context adapter also retains the canonical memory evaluation, snapshot, provenance, and retrieval sections, then adds visible thread messages. Both `context_service` and `memory` refer to that adapter. Context retrieval reuses the memory manager's configured semantic backend, including tenant-qualified SQLite paths under local WAL authority, rather than opening a separate unqualified index.
+
+Browser reconnects reuse one runtime per configured tenant within the Streamlit process rather than opening competing WAL writers. A dedicated reentrant UI admission lock serializes thread selection, turn context, approvals, and media model overrides; the internal session lock is not held across the canonical worker-thread bridge. Version replacement closes the old runtime before publishing its replacement. Media surfaces bind to the same bot and the tab's thread without disabling strict graph mode or using the legacy greeting fast path. Multiple server processes still require separate coordination and are not covered by this local runtime pool.
+
+New turns bind the active tenant and selected thread into the canonical request, jobs, checkpoints, and audit events. Explicit retry/replay contexts retain their original identity. Policy/capability traces and Merkle anchors accept the canonical top-level session metadata as well as the older nested control-plane form; a non-default UI thread must not execute or audit as `default`.
+
+Visible conversation history is stored separately in `session_logs/streamlit_threads.sqlite3` (override with `DADBOT_STREAMLIT_STATE_DB`), keyed by tenant and thread. New and duplicated threads are saved immediately, including empty threads. Each tab keeps its selected conversation in the `thread` URL parameter, so reloads and server restarts restore that selection without a shared last-selected preference. The URL is a selector, not an ownership credential; unavailable threads produce a warning instead of creating or exposing history.
+
+Unqualified legacy `chat_threads` rows are not imported automatically. Back up and verify the database before explicitly assigning reviewed history to its configured tenant in `owned_chat_threads`; do not infer ownership from a thread name or URL. Corrupt stored history raises an explicit error rather than silently becoming an empty conversation. Generated audio is not stored. UI outbox retries and toggle preferences remain browser-session-local; concurrent multi-user operation is not certified by the reload tests.
+
+Local-WAL graph refresh reads committed tenant sources even when runtime state has staged changes; it neither publishes those changes nor relaxes stale-revision checks. The local UI acceptance pass verifies canonical memory snapshots and a green runtime-health record after a real turn. This does not certify every deployment or external integration. An unconfigured optional EventTap still reports its separate checkpoint limitation; canonical graph checkpoint persistence does not depend on that tap.
 
 ### Environment Setup
 
@@ -726,6 +404,144 @@ and reranker firing rate. Set `DADBOT_RUN_REAL_EMBEDDING_BENCHMARK=1` to run
 its real local Ollama embedding cases; those cases need `nomic-embed-text`.
 
 ### Current memory persistence authority
+
+**Opt-in local file-WAL authority:** With
+`DADBOT_DURABLE_EXECUTION_LEDGER=1` and
+`DADBOT_EXECUTION_LEDGER_BACKEND=file`, an established tenant's committed
+memory catalog is authoritative. Indexed additions, updates, staged saves,
+and clears commit the tenant revision before repairing snapshots, graph,
+and semantic indexes. Repairs use revision fences and run independently.
+A post-commit repair failure is reported explicitly, preserves committed
+memory, and blocks further writes until restart/recovery. Startup replays
+the catalog and repairs derived stores; durable status replay identifies
+dirty indexes even when a crash interrupted status recording.
+Graph reads project the committed catalog rather than staged turn memory.
+This preserves pending updates for SaveNode without leaking them into graph
+context or weakening the tenant revision fence.
+
+Repeated committed-memory reads reuse the verified in-process ledger only
+when a SHA-256 digest of **all current WAL bytes**, read under the existing
+process lock, matches the last successfully loaded snapshot. Both plain
+and CRC WALs use this unchanged-file fast path; file size and modification
+time alone are never trusted. Binding checks still run on every plain-WAL
+check, and delegated/authenticated reads retain full per-event authority
+validation even when the bytes match. Any byte change triggers the full parse, seal,
+sequence, revision and replay-filter validation before publishing state.
+Local writes and new replay filters invalidate the digest. Explicit
+`load_from_backend()` recovery always performs a full reload, and failed
+reads/writes remain blocked until that explicit recovery succeeds.
+Stateful replay filters and custom backend subclasses retain full reloads.
+Graph and semantic index fences share a byte-verified committed projection
+snapshot while keeping the raw WAL writer lock held through publication.
+Every byte change forces a fresh verifier before checking the exact catalog
+and revision; staged runtime memory is never used as index authority.
+This removes repeated historical verification from context building
+without buffering commits, weakening fsync, or suppressing corruption.
+Hot-path request/effect indexes copy all event headers but only the payloads
+they actually consume; reconciliation reads copy only reconciliation events.
+Checkpoint, turn-event and lifecycle lookups likewise select their event
+types before copying; trace-to-session lookup needs only event headers.
+SaveNode's built-in-ledger authority lookup selects complete `GRAPH_CHECKPOINT`
+events before copying, then still compares the full checkpoint and session
+state. Payload trace matching, latest-event order, missing-checkpoint fallback
+and uncertain-ledger failures are unchanged; custom ledgers keep full reads.
+All existing tenant/session filters, malformed-record rejection, continuity
+hashes and explicit uncertain-ledger recovery requirements remain in place.
+Complete-run trace and composition checks select the union of matching trace
+headers and payload job IDs before copying, retaining each selected payload.
+The disabled built-in compactor checks the reconciled event count without
+copying payloads. Its trusted-local control-plane report hashes every complete
+payload under the ledger lock and keeps only isolated scalar digest records.
+It does not copy historical payloads or trust their canonical seals as a
+substitute for the full payload digest. An unchanged locked ledger version
+allows reuse of that exact digest. Changed heads still require a complete
+post-operation snapshot and digest; custom ledger/compactor/digest/partition
+implementations, replay filters and authenticated execution retain complete
+pre-operation snapshots. No events are trimmed, no durable-checkpoint requirement
+is relaxed, and uncertainty still requires explicit ledger recovery.
+Default full/tail reads still return complete, isolated deep copies, and
+trace roots, completion results and ambiguity checks remain ledger-derived.
+
+Verified built-in trusted-local WAL session-state writes omit top-level fields
+whose complete JSON value already matches the committed session projection.
+This uses the existing `SESSION_STATE_UPDATED` patch contract: CoreState event
+history and full runtime state are retained, and even an empty patch still
+commits its event and fsync boundary. Comparison and append hold the ledger lock
+and use ledger events, never the mutable registry; changed external heads fail
+the existing append checks. Tenant/session isolation, session deletion and
+`JOB_COMPLETED` result projection are preserved. Custom, filtered, unverified,
+non-fsynced and authenticated/delegated ledgers keep complete patches.
+Verified append fingerprints compare the complete appended JSON record,
+including its seals, rather than Python container equality. Tuple results and
+other existing JSON-normalized values therefore retain the verified fingerprint
+without changing the original event values returned to runtime callers.
+
+Trusted-local plain/CRC WAL appends also reuse a verified sealed prefix only
+after hashing **every existing byte under the writer lock**. The cached
+fingerprint binds those verified bytes plus the exact encoded append, not a
+possibly altered post-write file. New seals and sequences are always checked;
+tenant mutations still validate the entire tenant revision/operation history.
+Byte changes, delegated execution and custom backend subclasses retain full
+historical validation. Each required flush/fsync completes before caching the
+new prefix; a failed append discards it and keeps explicit recovery mandatory.
+Full recovery still verifies every historical event, but restores already
+verified seals without hashing them a second time. Legacy and replay-filtered
+records retain their existing normalization/resealing behavior. These changes
+reduce durable write overhead without batching away commit boundaries.
+
+Successful trusted-local writes retain that fingerprint in the runtime ledger
+only when the verified prefix matches its previous all-byte fingerprint (or
+every persisted record exactly equals its runtime counterpart), and the new
+event matches exactly. This prevents routine job/session writes from forcing a
+full WAL reload during the next context read without comparing historical
+payloads again for an already verified prefix. The refresh still hashes every
+byte under the writer lock; a matching canonical head alone is insufficient.
+Concurrent successors, differing metadata, replay filters, authenticated
+execution and custom ledger/backend classes retain the full refresh path.
+Failed appends or runtime publication still require explicit recovery.
+
+Job submission rebuilds the complete lifecycle projection from validated
+`EXECUTION_LIFECYCLE` events without copying unrelated memory/checkpoint payloads.
+Custom lifecycle projections retain their complete ledger input.
+Approval status/restart projections read all approval updates; the action queue
+reads approval updates and manual reviews together in one locked snapshot.
+These selectors preserve order, tenant/thread validation, isolated results and
+uncertain-ledger rejection. They do not narrow validation to only the selected
+thread or cache action decisions. Receipt replay still checks the original
+referenced event across the complete ledger before validating its IO type.
+
+SaveNode's local memory commits use the same byte-verified append prefix when
+it also exactly matches the reconciled shared runtime ledger. After fsync and
+snapshot publication, only the new committed event advances that runtime's
+head; the subsequent refresh still hashes all WAL bytes to detect another
+writer. Changed bytes, stale runtime heads, replay filters and delegated
+execution retain full validation/recovery. Tenant establishment evidence,
+revision fences and operation uniqueness are checked on every commit.
+Graph/semantic publication fences can reuse the backend's verified prefix
+after another all-byte check, while still validating the entire tenant
+catalog. This avoids repeatedly copying and rehydrating unrelated execution
+history during mood updates and maintenance saves. Failed writes or snapshot
+publication leave the shared ledger uncertain until explicit recovery; memory
+mutation also retains its existing restart/repair requirement.
+
+This local-first indexed-write path requires SQLite projections. Set
+`DADBOT_MEMORY_INDEX_BACKEND=sqlite` to select them without changing PostgreSQL
+snapshot persistence; unset or `auto` preserves the existing backend selection.
+Invalid backend values fail configuration validation. Their
+configured filenames gain `.tenant-<full-tenant-hash>` before the extension,
+so different tenants do not share an index. Existing unqualified caches are
+preserved and rebuilt from the ledger rather than trusted as migration input.
+Other indexed backends remain rejected in this path. Do not enable authority
+on existing unowned memory snapshots without a reviewed migration: startup
+requires tenant ownership evidence and does not infer it from a shared file.
+Once established, disabling or switching the ledger is rejected; recovery
+must preserve WAL authority rather than overwrite it with a snapshot.
+Physical publication generations and the full release/recovery matrix remain
+separate acceptance work. See
+[durable memory implementation status](./DURABLE_MEMORY_IMPLEMENTATION_STATUS.md).
+
+**Without established file-WAL authority**, the following snapshot-first
+behavior applies:
 
 The configured tenant document store is the primary memory snapshot when it is
 durable; with a composite Redis/Postgres store, Postgres is primary. In the
@@ -997,26 +813,37 @@ the reversible archive can grow; there is no automatic archive retention limit.
 
 ### Local Model Context and Timing
 
-Ollama requests allocate `num_ctx` in power-of-two buckets starting at 512
-(512, 1024, 2048, 4096, 8192, and larger when requested), capped by the
-model's context capacity. The prompt guard still uses DadBot's configured
-`CONTEXT_TOKEN_BUDGET` (default 6000) or the request's explicit budget, capped
-by the model's capacity; bucketing does not expand the allowed prompt.
-Thus a 6000-token budget allocates an 8192-token context when supported,
-using more KV-cache memory than an unbucketed allocation.
+Ollama requests use DadBot's configured `CONTEXT_TOKEN_BUDGET` (default 6000)
+or the request's explicit `num_ctx`, capped by the model's context capacity.
+There is no power-of-two rounding: a 6000-token budget requests 6000 tokens.
 A Modelfile's default `num_ctx` is not treated as the architectural capacity.
 Before transport, the prompt guard drops older history and trims oversized
 messages, preserving the latest task where possible. Thinking-capable models
-reserve at least 3072 tokens for generation, capped at half the request window;
-other models use `RESERVED_RESPONSE_TOKENS` (minimum 64).
+reserve at least 3072 tokens for generation, capped at half the request window,
+unless the effective request explicitly disables thinking. Non-thinking
+requests use `RESERVED_RESPONSE_TOKENS` (minimum 64), also capped at half the
+window. Invalid `DADBOT_OLLAMA_CHAT_THINK` values fail configuration validation.
 
 Reasoning-only responses that end with `done_reason=length` raise an explicit
-budget-exhaustion error rather than succeeding with an empty answer. This
+budget-exhaustion error rather than succeeding with an empty answer. Other
+empty completions also fail at the transport boundary with completion reason
+and token counts; hidden reasoning is never substituted for the answer. This
 does not guarantee unlimited reasoning fits; increase the configured context
 within available memory when necessary. INFO-level Ollama timing logs include
 request purpose, token counts, load/generation durations, and completion reason,
 but not prompt, answer, or hidden-reasoning text. Mood detection, tool planning,
 and chat can each incur a separate generation.
+Canonical live-turn logs additionally report wall time and success/error status
+through checkpoint completion; they do not include the conversation text.
+Concurrent runtime builds serialize Chroma client construction so another
+browser session cannot observe a shared Rust backend before startup completes.
+
+Live conversational confluence keys include request identity as well as
+tenant, session, wording, and attachments. Repeating the same wording in a new
+request is valid. Retrying an existing request preserves its identity and
+cached committed result; explicitly reusing its confluence key still enforces
+the original execution contract. The request factory allocates an identity
+once when the caller has not supplied one.
 
 Chat requests use `keep_alive=-1` by default. Set
 `DADBOT_OLLAMA_KEEP_ALIVE_SECONDS=300` before startup to restore a five-minute
@@ -1100,16 +927,19 @@ Anything beyond those lanes should be treated as supplemental, not mandatory.
 
 ### Feature Maturity Matrix
 
-| Capability | Maturity | Evidence |
+| Capability | Status | Evidence |
 |---|---|---|
-| Core local chat + memory pipeline | Available, with UI limitations | `dadbot/core/dadbot.py`, `dadbot/core/turn_mixin.py`, `dadbot/core/graph.py`; the Streamlit sample currently uses no-op turn-event/checkpoint persistence services. Profile and memory storage are separate. |
-| Captured voice-to-reply path | Partial; full-duplex streaming not certified | `dadbot/speech/voice_loop.py`, `dadbot/ui/media/service.py`, `[project.optional-dependencies].voice` |
-| Local reminders + local calendar events | Shipped (local storage) | `dadbot/agentic.py` (`add_reminder`, `add_calendar_event`, `list_calendar_events`) |
-| Calendar feed synchronization | Partial | `dadbot/core/boot_mixin.py` (`ical_feed_url`, `schedule_calendar_sync`) |
-| Proactive heartbeat/nudges | Partial | `dadbot/core/boot_mixin.py` (`_run_proactive_heartbeat_loop`), `dadbot/assistant_runtime.py` |
-| Avatar rendering support | Partial | `dad_streamlit.py`, `pyproject.toml` (`[project.optional-dependencies].heritage`) |
+| Core chat and memory | Available; durability depends on configured backends | Canonical turn path and memory services |
+| Voice | Partial; full-duplex streaming is not certified | `dadbot/speech/voice_loop.py`, `dadbot/ui/media/service.py` |
+| Reminders and calendar | Local events available; feed sync is partial | `dadbot/agentic.py`, `dadbot/core/boot_mixin.py` |
+| Proactive check-ins | Partial | `dadbot/core/boot_mixin.py` |
+| Agent Driver Loop | Experimental API; uses hybrid memory with conflict and timestamp signals, structured reflection, a pre-dispatch plan gate, ledger-recorded goal state, and bounded heartbeat-triggered turns; consolidation remains post-commit | `dadbot/runtime/agent_driver_loop.py`, unit and integration tests |
+| Avatar rendering | Partial | `dad_streamlit.py`, optional `heritage` dependencies |
 
-The Streamlit runtime is a development/demo composition, not the durable service profile: its turn-event and checkpoint persistence methods are no-ops, and its event bus is in-memory. Do not treat those records as restart-durable.
+Streamlit chat uses the canonical turn path. Restart durability depends on the
+selected ledger and storage backends; display history and browser-local retries
+are separate from memory authority. Local tests do not certify every deployment
+or concurrent-user configuration.
 
 ### Docker (Dev & Production)
 

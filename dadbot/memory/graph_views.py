@@ -16,15 +16,16 @@ def _projection_cache_key(manager, temporal, enforce_temporal_window):
     )
 
 
-def _project_node_state(manager, node_map, edge_map, turn_context):
-    manager._project_consolidated_memories(
-        node_map,
-        edge_map,
-        turn_context=turn_context,
+def _project_node_state(manager, node_map, edge_map, turn_context, store_projection):
+    sources = (
+        ("consolidated_memories", manager._project_consolidated_memories, manager._mm.consolidated_memories),
+        ("session_archive", manager._project_archive_sessions, manager._mm.session_archive),
+        ("persona_evolution", manager._project_persona_traits, manager._mm.persona_evolution_history),
+        ("life_patterns", manager._project_life_patterns, manager._mm.life_patterns),
     )
-    manager._project_archive_sessions(node_map, edge_map, turn_context=turn_context)
-    manager._project_persona_traits(node_map, edge_map, turn_context=turn_context)
-    manager._project_life_patterns(node_map, edge_map, turn_context=turn_context)
+    for key, project, load_entries in sources:
+        entries = load_entries() if store_projection is None else store_projection.get(key, [])
+        project(node_map, edge_map, entries=entries, turn_context=turn_context)
 
 
 def _apply_view_filters(manager, edge_map, node_keys, current_time_str):
@@ -108,21 +109,22 @@ def _build_preview_edge_weights(source_neighbors):
     return edge_weights
 
 
-def build_graph_projection(manager, turn_context=None):
+def build_graph_projection(manager, turn_context=None, *, store_projection=None):
     temporal = manager._require_turn_temporal(turn_context)
     enforce_temporal_window = turn_context is not None
     cache_key = _projection_cache_key(manager, temporal, enforce_temporal_window)
-    cached = manager._projection_cache.get(cache_key)
+    cached = manager._projection_cache.get(cache_key) if store_projection is None else None
     if cached is not None:
         return copy.deepcopy(cached)
     node_map = {}
     edge_map = {}
-    _project_node_state(manager, node_map, edge_map, turn_context)
+    _project_node_state(manager, node_map, edge_map, turn_context, store_projection)
     current_time_str = str(getattr(temporal, "wall_time", "")) if enforce_temporal_window else ""
     nodes, edges = _map_edge_topology(manager, node_map, edge_map, current_time_str)
     updated_at = _snapshot_updated_at(nodes, edges)
     snapshot = {"nodes": nodes, "edges": edges, "updated_at": updated_at}
-    manager._projection_cache[cache_key] = copy.deepcopy(snapshot)
+    if store_projection is None:
+        manager._projection_cache[cache_key] = copy.deepcopy(snapshot)
     return snapshot
 
 
@@ -191,11 +193,18 @@ def sync_graph_store(manager, turn_context=None):
     uses_authority = callable(local_backend) and local_backend() is not None
     io_lock = getattr(runtime, "_io_lock", None)
     with io_lock if uses_authority and io_lock is not None else nullcontext():
-        if uses_authority:
+        if uses_authority and storage is not None:
             revision = storage._tenant_base_revision
-            projection = manager._mm.normalize_memory_store(manager._mm.memory_projection())
-        snapshot = build_graph_projection(manager, turn_context=turn_context)
-        fence = storage.fenced_graph_index_write(revision, projection) if uses_authority else nullcontext()
+            projection = storage.committed_tenant_projection()
+            if projection is None:
+                raise RuntimeError("Local graph sync requires committed tenant memory")
+            snapshot = build_graph_projection(manager, turn_context=turn_context, store_projection=projection)
+        else:
+            snapshot = build_graph_projection(manager, turn_context=turn_context)
+        fence = (
+            storage.fenced_graph_index_write(revision, projection)
+            if uses_authority and storage is not None else nullcontext()
+        )
         with fence:
             manager.ensure_graph_store()
             manager._graph_store_backend.replace_graph(
@@ -208,12 +217,14 @@ def sync_graph_store(manager, turn_context=None):
 def graph_snapshot(manager):
     storage = getattr(manager._mm, "_storage", None)
     local_backend = getattr(storage, "_local_authority_backend", None)
-    if callable(local_backend) and local_backend() is not None:
+    if storage is not None and callable(local_backend) and local_backend() is not None:
         with manager._bot._io_lock:
             revision = storage._tenant_base_revision
-            projection = manager._mm.normalize_memory_store(manager._mm.memory_projection())
+            projection = storage.committed_tenant_projection()
+            if projection is None:
+                raise RuntimeError("Local graph reads require committed tenant memory")
             manager.invalidate_projection_cache()
-            snapshot = build_graph_projection(manager, turn_context=None)
+            snapshot = build_graph_projection(manager, turn_context=None, store_projection=projection)
             with storage.fenced_graph_index_write(revision, projection):
                 return snapshot
     try:

@@ -12,6 +12,7 @@ from dadbot.runtime.structured_output import (
     build_llm_reflection_hook,
     build_reflection_prompt,
     parse_agent_plan,
+    verify_agent_plan,
 )
 
 pytestmark = pytest.mark.unit
@@ -100,6 +101,33 @@ class TestParseAgentPlan:
         plan2 = parse_agent_plan(_valid_plan_json(confidence=1.0))
         assert plan2.confidence == pytest.approx(1.0)
 
+    def test_goal_updates_are_trimmed_and_sorted(self) -> None:
+        plan = parse_agent_plan(
+            _valid_plan_json(goal_updates={" status ": " in progress ", "owner": " Alex "})
+        )
+        assert plan.goal_updates == {"owner": "Alex", "status": "in progress"}
+
+    def test_rejects_blank_goal_update(self) -> None:
+        with pytest.raises(SchemaValidationError):
+            parse_agent_plan(_valid_plan_json(goal_updates={"status": "   "}))
+
+    def test_rejects_duplicate_goal_keys_after_trimming(self) -> None:
+        with pytest.raises(SchemaValidationError, match="unique after trimming"):
+            parse_agent_plan(_valid_plan_json(goal_updates={"status": "open", " status ": "closed"}))
+
+    def test_rejects_more_than_sixteen_goal_updates(self) -> None:
+        updates = {f"goal_{index}": "active" for index in range(17)}
+        with pytest.raises(SchemaValidationError):
+            parse_agent_plan(_valid_plan_json(goal_updates=updates))
+
+    def test_rejects_goal_board_growth_past_sixty_four_entries(self) -> None:
+        board = {f"goal_{index}": "active" for index in range(64)}
+        with pytest.raises(SchemaValidationError, match="64 entries"):
+            verify_agent_plan(
+                {"action_input": "continue", "goal_updates": {"new_goal": "active"}},
+                current_goal_blackboard=board,
+            )
+
 
 # ---------------------------------------------------------------------------
 # build_reflection_prompt
@@ -120,11 +148,22 @@ class TestBuildReflectionPrompt:
         assert msgs[1]["role"] == "user"
 
     def test_user_message_is_json_parseable(self) -> None:
-        ctx = {"turn_index": 1, "last_reply": "done", "initial_observation": "hi", "records": []}
+        ctx = {
+            "turn_index": 1,
+            "last_reply": "done",
+            "initial_observation": "hi",
+            "observation": "memory-first context",
+            "goal_blackboard": {"status": "in progress"},
+            "memory_signals": {"conflicts": [], "temporal": [{"event_time": "2026-01-01"}]},
+            "records": [],
+        }
         msgs = build_reflection_prompt(ctx)
         payload = json.loads(msgs[1]["content"])
         assert "last_reply" in payload
         assert "turn_index" in payload
+        assert payload["observation"] == "memory-first context"
+        assert payload["goal_blackboard"] == {"status": "in progress"}
+        assert payload["memory_signals"]["temporal"][0]["event_time"] == "2026-01-01"
 
     def test_tool_names_appear_in_system_prompt(self) -> None:
         ctx = {"turn_index": 1, "last_reply": "", "initial_observation": "", "records": []}
@@ -164,6 +203,7 @@ class TestBuildLLMReflectionHook:
                 "reasoning": "need more info",
                 "tool_calls": [],
                 "confidence": 0.85,
+                "goal_updates": {"status": "in progress"},
             }
         )
         client = _FakeLLMClient(raw)
@@ -172,6 +212,7 @@ class TestBuildLLMReflectionHook:
         assert result["should_continue"] is True
         assert result["action_input"] == "check status"
         assert result["confidence"] == pytest.approx(0.85)
+        assert result["goal_updates"] == {"status": "in progress"}
 
     def test_hook_calls_llm_once(self) -> None:
         raw = json.dumps({"action_input": "next step", "should_continue": True})

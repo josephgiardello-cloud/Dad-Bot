@@ -13,9 +13,11 @@ class _KernelStub:
     def __init__(self, replies: list[tuple[str, bool]]) -> None:
         self.replies = list(replies)
         self.calls: list[str] = []
+        self.requests = []
 
     def execute_turn(self, request, **_kwargs):
         assert request.delivery == TurnDelivery.SYNC
+        self.requests.append(request)
         self.calls.append(str(request.input.text or ""))
         if not self.replies:
             return TurnResponse(reply="", should_end=False)
@@ -117,3 +119,62 @@ def test_driver_loop_retries_after_system_observation_without_noop_penalty():
     assert result.records[0].commit_status == "skipped"
     assert result.records[1].commit_status == "committed"
     assert kernel.calls == ["retry with valid tool"]
+
+
+def test_driver_loop_reflects_on_observation_and_ledger_records_goal_board():
+    kernel = _KernelStub(replies=[("progress", False), ("done", True)])
+    loop = AgentDriverLoop(kernel, policy=DriverLoopPolicy(max_turns=3))
+    contexts = []
+
+    def reflection_hook(ctx):
+        contexts.append(ctx)
+        if ctx["turn_index"] == 1:
+            return {"action_input": "start task", "goal_updates": {"status": "in progress"}}
+        return {"action_input": "finish task"}
+
+    result = loop.run("initial task", tenant_id="tenant-a", reflection_hook=reflection_hook)
+
+    assert contexts[0]["observation"] == "initial task"
+    assert contexts[1]["goal_blackboard"] == {"status": "in progress"}
+    assert result.goal_blackboard == {"status": "in progress"}
+    assert kernel.requests[0].context.tenant_id == "tenant-a"
+    assert kernel.requests[0].metadata["agent_loop"] == {
+        "turn_index": 1,
+        "goal_blackboard": {"status": "in progress"},
+        "plan_verification": "passed",
+        "trigger_type": "interactive",
+    }
+
+
+def test_driver_loop_rejects_invalid_plan_before_kernel_dispatch():
+    kernel = _KernelStub(replies=[("unused", True)])
+    loop = AgentDriverLoop(
+        kernel,
+        policy=DriverLoopPolicy(max_turns=3, max_failures=0),
+        allowed_tools=["safe_tool"],
+    )
+
+    result = loop.run(
+        "start",
+        reflection_hook=lambda _ctx: {
+            "action_input": "run a tool",
+            "tool_calls": [{"name": "unsafe_tool", "arguments": {}}],
+        },
+    )
+
+    assert result.stop_reason == "failure_budget"
+    assert result.failures == 1
+    assert kernel.calls == []
+    assert result.records[0].commit_status == "rejected"
+    assert "not in allowed list" in result.records[0].error
+
+
+def test_driver_loop_rejects_non_string_action_before_kernel_dispatch():
+    kernel = _KernelStub(replies=[("unused", True)])
+    loop = AgentDriverLoop(kernel, policy=DriverLoopPolicy(max_failures=0))
+
+    result = loop.run("start", reflection_hook=lambda _ctx: {"action_input": 42})
+
+    assert result.stop_reason == "failure_budget"
+    assert kernel.calls == []
+    assert result.records[0].commit_status == "rejected"
