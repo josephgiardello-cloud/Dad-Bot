@@ -33,7 +33,7 @@ from dadbot.core._tool_sandbox import ToolExecutionRecord, _ToolSandbox
 from dadbot.core.runtime_errors import ReplayInvariantViolation
 from dadbot.core.tool_recording import ToolIOLedger, ToolIORecord
 from dadbot.pii_scrubber import scrub_text
-from dadbot.telemetry.otel_bridge import start_span
+from dadbot_system.runtime_signals import start_span
 
 logger = logging.getLogger(__name__)
 

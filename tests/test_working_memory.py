@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import ast
 import asyncio
 from datetime import datetime
 from pathlib import Path
@@ -7,6 +8,7 @@ from types import SimpleNamespace
 
 import pytest
 
+from ci.ast_invariant_check import _scan_persistence_reasoning_references
 from dadbot.core._tool_sandbox import ToolExecutionRecord
 from dadbot.memory.working_memory import (
     WorkingMemoryStore,
@@ -18,6 +20,23 @@ from dadbot.services.persistence import PersistenceService
 from dadbot.services.turn_service import TurnService
 
 pytestmark = pytest.mark.unit
+
+
+@pytest.mark.parametrize(
+    ("source", "allowed"),
+    [
+        ("from dadbot.memory.working_memory import promote_committed_working_memory", True),
+        ("from dadbot.memory.working_memory import promote_committed_working_memory as promote", True),
+        ("from dadbot.memory.working_memory import WorkingMemoryStore", False),
+        ("from dadbot.memory.working_memory import *", False),
+        ("import dadbot.memory.working_memory", False),
+        ("from dadbot.managers.memory_coordination import MemoryCoordinator", False),
+        ("runtime.consolidate_memories()", False),
+    ],
+)
+def test_persistence_guard_allows_only_committed_fact_linking(source, allowed):
+    violations = _scan_persistence_reasoning_references(ast.parse(source))
+    assert bool(violations) is not allowed
 
 
 def _runtime(tmp_path: Path, tenant_id: str = "tenant-a") -> SimpleNamespace:

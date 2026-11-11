@@ -39,7 +39,8 @@ RULE17_LLM_COMMIT_SEPARATION
     The persistence module must remain post-commit pure. It may publish a
     post-commit-ready event, but it must not import or call memory-reasoning or
     LLM-adjacent functionality. Those operations belong exclusively in the
-    post-commit worker.
+    post-commit worker. Linking committed facts to working-memory records is
+    persistence bookkeeping, not reasoning.
 
 RULE18_TURN_ENTRYPOINT_CLOSURE
     Production callers under ``dadbot/`` must use the canonical
@@ -63,7 +64,7 @@ from pathlib import Path
 if __package__ in (None, ""):
     sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
-from ci.import_graph_check import classify_layer
+from ci.import_graph_check import classify_layer, iter_python_files
 
 ROOT = Path(__file__).resolve().parents[1]
 EXCLUDED_DIR_NAMES = {".git", ".venv", "__pycache__", ".pytest_cache", ".ruff_cache", "external"}
@@ -89,15 +90,9 @@ class Violation:
 
 
 def _iter_python_files() -> list[Path]:
-    files: list[Path] = []
-    for path in ROOT.rglob("*.py"):
-        rel = path.relative_to(ROOT)
-        if any(part.startswith(".venv") or part in EXCLUDED_DIR_NAMES for part in rel.parts):
-            continue
-        if len(rel.parts) > 1 and rel.parts[0] not in INCLUDED_TOP_LEVEL_DIRS:
-            continue
-        files.append(path)
-    return files
+    return list(iter_python_files(
+        ROOT, excluded_dirs=EXCLUDED_DIR_NAMES, included_top_level_dirs=INCLUDED_TOP_LEVEL_DIRS,
+    ))
 
 
 def _rel(path: Path) -> str:
@@ -495,6 +490,12 @@ def _scan_persistence_reasoning_references(tree: ast.AST) -> list[tuple[int, str
     for node in ast.walk(tree):
         if isinstance(node, ast.ImportFrom):
             module_name = str(node.module or "")
+            if (
+                node.level == 0
+                and module_name == "dadbot.memory.working_memory"
+                and all(alias.name == "promote_committed_working_memory" for alias in node.names)
+            ):
+                continue
             if any(part in module_name for part in _PERSISTENCE_BANNED_IMPORT_SUBSTRINGS):
                 found.append((
                     node.lineno,
