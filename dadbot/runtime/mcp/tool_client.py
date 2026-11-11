@@ -5,9 +5,10 @@ import json
 import logging
 import os
 import re
+from collections.abc import AsyncIterator, Awaitable, Callable
 from contextlib import asynccontextmanager
 from dataclasses import dataclass, field
-from typing import Any, AsyncIterator, Callable
+from typing import Any
 from uuid import uuid4
 
 from jsonschema import validators
@@ -460,13 +461,14 @@ async def _advance_mcp_tool_loop(
         state.results = []
 
 
-async def resume_mcp_with_fallback(
+async def resume_mcp_with_fallback(  # noqa: PLR0913
     request: MCPApprovalRequest,
     client: MCPToolClient,
     allowed_names: set[str],
     *,
     approved: bool,
     model_call: Callable[[list[dict[str, Any]], dict[str, Any]], str],
+    tool_call: Callable[[Any, str, dict[str, Any]], Awaitable[dict[str, Any]]] | None = None,
 ) -> str | MCPApprovalRequest:
     """Revalidate a pending call against the live server before executing one approval."""
     if request.consumed:
@@ -504,7 +506,10 @@ async def resume_mcp_with_fallback(
             return await _advance_mcp_tool_loop(
                 state,
                 model_call=model_call,
-                tool_call=lambda name, arguments: client.call_tool(session, name, arguments),
+                tool_call=lambda name, arguments: (
+                    tool_call(session, name, arguments) if tool_call is not None
+                    else client.call_tool(session, name, arguments)
+                ),
                 approve_tool_call=lambda _name, _arguments: True,
                 approval_limit=1,
             )

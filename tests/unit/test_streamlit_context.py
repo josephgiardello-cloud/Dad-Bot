@@ -1,9 +1,9 @@
-import tempfile
-from pathlib import Path
+import sqlite3
 from types import SimpleNamespace
 
 import pytest
 
+from dadbot.services.context_service import ContextService
 from dadbot.ui.streamlit_context import (
     SQLiteStreamlitThreadStore,
     StreamlitContextService,
@@ -104,30 +104,99 @@ def test_context_service_falls_back_to_canonical_conversation_history():
     assert context["messages"] == [{"role": "user", "content": "CLI prior turn"}]
 
 
+def test_streamlit_context_retains_canonical_memory_and_temporal_sections(mocker):
+    canonical = mocker.Mock(spec=ContextService)
+    canonical.build_context.return_value = {
+        "memory": "Relevant committed memory",
+        "memory_layers": {"structured_tokens": 12},
+        "temporal": {"wall_time": "2026-11-11T12:00:00"},
+    }
+    bot = SimpleNamespace(_streamlit_context_messages=[{"role": "user", "content": "Visible thread"}])
+    service = StreamlitContextService(bot, context_service=canonical)
+    turn = SimpleNamespace(state={"temporal": {"old": True}})
+    result = service.build_context(turn)
+    canonical.build_context.assert_called_once_with(turn)
+    assert result == {
+        **canonical.build_context.return_value,
+        "messages": bot._streamlit_context_messages,
+    }
+
+
+def test_streamlit_context_propagates_canonical_memory_failure(mocker):
+    canonical = mocker.Mock(spec=ContextService)
+    canonical.build_context.side_effect = RuntimeError("memory snapshot unavailable")
+    service = StreamlitContextService(context_service=canonical)
+    with pytest.raises(RuntimeError, match="memory snapshot unavailable"):
+        service.build_context(SimpleNamespace(state={}))
+
+
 def test_runtime_thread_id_updates_canonical_session_key(bot):
     set_runtime_thread_id(bot, "thread-42")
 
     assert bot.runtime_state_manager.active_thread_id == bot.active_thread_id == "thread-42"
 
 
-def test_sqlite_thread_store_survives_reopen_and_omits_audio_payload():
-    with tempfile.TemporaryDirectory(dir=Path.cwd()) as temp_dir:
-        db_path = Path(temp_dir) / "threads.sqlite3"
-        store = SQLiteStreamlitThreadStore(db_path)
-        store.save_thread(
-            "thread-1",
-            [
-                {"role": "user", "text": "Hello", "time": "10:00"},
-                {"role": "assistant", "text": "Hi", "time": "10:01", "audio_base64": "not-persisted"},
-            ],
-        )
-
-        restored = SQLiteStreamlitThreadStore(db_path).load_threads()
-
-        assert restored["thread-1"] == [
+def test_sqlite_thread_store_survives_reopen_and_omits_audio_payload(tmp_path):
+    db_path = tmp_path / "threads.sqlite3"
+    store = SQLiteStreamlitThreadStore(db_path, tenant_id="tenant-a")
+    store.save_thread(
+        "thread-1",
+        [
             {"role": "user", "text": "Hello", "time": "10:00"},
-            {"role": "assistant", "text": "Hi", "time": "10:01"},
-        ]
+            {"role": "assistant", "text": "Hi", "time": "10:01", "audio_base64": "not-persisted"},
+        ],
+    )
+
+    restored = SQLiteStreamlitThreadStore(db_path, tenant_id="tenant-a").load_threads()
+
+    assert restored["thread-1"] == [
+        {"role": "user", "text": "Hello", "time": "10:00"},
+        {"role": "assistant", "text": "Hi", "time": "10:01"},
+    ]
+
+
+def test_sqlite_threads_are_tenant_scoped_and_do_not_import_unowned_rows(tmp_path):
+    db_path = tmp_path / "threads.sqlite3"
+    with sqlite3.connect(db_path) as connection:
+        connection.execute("CREATE TABLE chat_threads(thread_id TEXT PRIMARY KEY, messages_json TEXT, updated_at TEXT)")
+        connection.execute("INSERT INTO chat_threads VALUES ('legacy', '[]', 'old')")
+    first = SQLiteStreamlitThreadStore(db_path, tenant_id="tenant-a")
+    second = SQLiteStreamlitThreadStore(db_path, tenant_id="tenant-b")
+    assert first.load_threads() == second.load_threads() == {}
+    first.save_thread("same-id", [{"role": "user", "text": "First", "time": "10:00"}])
+    second.save_thread("same-id", [{"role": "user", "text": "Second", "time": "10:01"}])
+    first.save_thread("same-id", [])
+    assert first.load_threads() == {"same-id": []}
+    assert second.load_threads()["same-id"][0]["text"] == "Second"
+    with sqlite3.connect(db_path) as connection:
+        assert connection.execute("SELECT thread_id FROM chat_threads").fetchall() == [("legacy",)]
+
+
+@pytest.mark.parametrize("payload", ["not-json", "{}", '[{"role":"tool","text":"invalid"}]', "[null]"])
+def test_corrupt_thread_history_is_reported_instead_of_replaced_with_empty_history(tmp_path, payload):
+    db_path = tmp_path / "threads.sqlite3"
+    store = SQLiteStreamlitThreadStore(db_path, tenant_id="tenant-a")
+    store.save_thread("thread-1", [])
+    with sqlite3.connect(db_path) as connection:
+        connection.execute(
+            "UPDATE owned_chat_threads SET messages_json=? WHERE tenant_id=? AND thread_id=?",
+            (payload, "tenant-a", "thread-1"),
+        )
+    with pytest.raises(ValueError):
+        store.load_threads()
+
+
+def test_thread_store_revalidates_active_tenant_authority(tmp_path, monkeypatch):
+    store = SQLiteStreamlitThreadStore(tmp_path / "threads.sqlite3", tenant_id="tenant-a")
+
+    def revoked(_tenant_id):
+        raise PermissionError("Tenant authority revoked")
+
+    monkeypatch.setattr("dadbot_system.delegation.require_tenant_authority_if_active", revoked)
+    with pytest.raises(PermissionError, match="revoked"):
+        store.load_threads()
+    with pytest.raises(PermissionError, match="revoked"):
+        store.save_thread("thread-1", [])
 
 
 def test_reflection_service_delegates_to_internal_state_manager():

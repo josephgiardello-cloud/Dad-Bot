@@ -291,20 +291,8 @@ class ServiceRegistry:
         # and health snapshot atomically at the end of every graph turn.
         turn_service = bot.turn_service
 
-        # Semantic index for RAG: surfaces relevant long-term memories in ContextService
-        # rather than only the most-recent window, avoiding context bloat as memory grows.
-        semantic_index = None
-        semantic_db_path = getattr(bot, "SEMANTIC_MEMORY_DB_PATH", None)
-        if semantic_db_path is not None:
-            try:
-                semantic_index = _instantiate(
-                    "dadbot_system.semantic_index:SQLiteSemanticIndex",
-                    bot,
-                    semantic_db_path,
-                )
-                semantic_index.ensure_storage()
-            except Exception:
-                pass  # Non-fatal: ContextService degrades to base context without RAG
+        semantic_manager = getattr(bot.memory_manager, "_semantic_manager", None)
+        semantic_index = getattr(semantic_manager, "_semantic_index_backend", None)
 
         registry.register(
             "persistence_service",

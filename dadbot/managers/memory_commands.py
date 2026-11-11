@@ -254,7 +254,8 @@ class MemoryCommandManager:
             if message["role"] == "user":
                 if self.parse_memory_command(message["content"]) is not None:
                     continue
-                if self.bot.parse_tool_command(message["content"]) is not None:
+                parse_tool_command = getattr(self.bot, "parse_tool_command", None)
+                if callable(parse_tool_command) and parse_tool_command(message["content"]) is not None:
                     continue
                 if self.bot.get_memory_reply(message["content"]) is not None:
                     continue

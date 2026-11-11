@@ -28,10 +28,12 @@ from dadbot.ui.media.service import MediaService
 from dadbot.ui.source_grounding import render_source_mode
 from dadbot.ui.streamlit_context import (
     SQLiteStreamlitThreadStore,
+    StreamlitBotPool,
     StreamlitContextService,
     StreamlitReflectionService,
     serialize_thread_messages,
     set_runtime_thread_id,
+    streamlit_turn_lock,
 )
 from dadbot_system.contracts import DEFAULT_MODEL
 
@@ -40,7 +42,31 @@ def _now_stamp() -> str:
     return datetime.datetime.now().strftime("%H:%M:%S")
 
 
+def _restore_thread_selection(threads: dict[str, list[dict[str, Any]]]) -> None:
+    requested = st.query_params.get("thread")
+    active = st.session_state.get("active_thread_id", "default")
+    if requested is not None:
+        if requested in threads:
+            active = requested
+        else:
+            st.warning("The requested conversation is unavailable for this tenant. Showing your current conversation.")
+    if active not in threads:
+        active = "default"
+    st.session_state.active_thread_id = active
+    if st.session_state.get("thread-picker") != active:
+        st.session_state["thread-picker"] = active
+
+
 def _ensure_ui_runtime_state() -> None:
+    tenant_id = st.session_state.bot.config.tenant_id
+    previous_tenant = st.session_state.get("_streamlit_ui_tenant")
+    if previous_tenant is not None and previous_tenant != tenant_id:
+        for key in (
+            "chat_history", "chat_threads", "active_thread_id", "thread-picker",
+            "runtime_events", "runtime_guardrails", "message_outbox",
+        ):
+            st.session_state.pop(key, None)
+    st.session_state["_streamlit_ui_tenant"] = tenant_id
     if "chat_history" not in st.session_state:
         st.session_state.chat_history = []
 
@@ -50,9 +76,13 @@ def _ensure_ui_runtime_state() -> None:
         load_threads = getattr(thread_store, "load_threads", None)
         restored = load_threads() if callable(load_threads) else {}
         st.session_state.chat_threads = restored or {"default": seeded}
+    threads = st.session_state["chat_threads"]
+    if not isinstance(threads, dict):
+        raise TypeError("Streamlit conversation state must be a thread mapping")
+    threads.setdefault("default", [])
+    st.session_state.chat_threads = threads
 
-    if "active_thread_id" not in st.session_state:
-        st.session_state.active_thread_id = "default"
+    _restore_thread_selection(threads)
 
     if "runtime_events" not in st.session_state:
         st.session_state.runtime_events = []
@@ -602,13 +632,13 @@ def _set_thread_messages(messages: list[dict[str, Any]], thread_id: str | None =
     tid = str(thread_id or _active_thread_id())
     threads = dict(st.session_state.get("chat_threads") or {})
     threads[tid] = [dict(item) for item in list(messages or []) if isinstance(item, dict)]
-    st.session_state.chat_threads = threads
-    if tid == _active_thread_id():
-        st.session_state.chat_history = list(threads[tid])
     thread_store = getattr(st.session_state.get("bot"), "_streamlit_thread_store", None)
     save_thread = getattr(thread_store, "save_thread", None)
     if callable(save_thread):
         save_thread(tid, threads[tid])
+    st.session_state.chat_threads = threads
+    if tid == _active_thread_id():
+        st.session_state.chat_history = list(threads[tid])
 
 
 def _append_chat_message(
@@ -638,21 +668,25 @@ def _switch_active_thread(thread_id: str) -> None:
     tid = str(thread_id or "default")
     threads = dict(st.session_state.get("chat_threads") or {})
     if tid not in threads:
-        threads[tid] = []
-        st.session_state.chat_threads = threads
+        raise ValueError("The requested conversation is unavailable for this tenant")
+    active_bot = st.session_state.get("bot")
+    if active_bot is not None:
+        with streamlit_turn_lock(active_bot):
+            set_runtime_thread_id(active_bot, tid)
+            active_bot._streamlit_active_thread_id = tid
     st.session_state.active_thread_id = tid
     st.session_state.chat_history = _thread_messages(tid)
-    active_bot = st.session_state.get("bot")
-    set_runtime_thread_id(active_bot, tid)
-    if active_bot is not None:
-        active_bot._streamlit_active_thread_id = tid
+    if st.query_params.get("thread") != tid:
+        st.query_params["thread"] = tid
+
+
+def _select_active_thread() -> None:
+    _switch_active_thread(st.session_state["thread-picker"])
 
 
 def _create_new_thread() -> str:
     tid = f"thread-{uuid.uuid4().hex[:8]}"
-    threads = dict(st.session_state.get("chat_threads") or {})
-    threads[tid] = []
-    st.session_state.chat_threads = threads
+    _set_thread_messages([], tid)
     _switch_active_thread(tid)
     st.session_state["thread-picker"] = tid
     _record_runtime_event("thread_created", f"Created {tid}")
@@ -663,9 +697,7 @@ def _fork_active_thread() -> str:
     source_id = _active_thread_id()
     source = _thread_messages(source_id)
     tid = f"fork-{uuid.uuid4().hex[:8]}"
-    threads = dict(st.session_state.get("chat_threads") or {})
-    threads[tid] = list(source)
-    st.session_state.chat_threads = threads
+    _set_thread_messages(source, tid)
     _switch_active_thread(tid)
     st.session_state["thread-picker"] = tid
     _record_runtime_event("thread_forked", f"Forked into {tid}")
@@ -794,10 +826,13 @@ def _render_thread_sidebar(page: str | None = None) -> None:
         active = _active_thread_id()
 
     index = thread_ids.index(active) if active in thread_ids else 0
-    selected = st.sidebar.selectbox("Active conversation", thread_ids, index=index, key="thread-picker")
-    if str(selected) != active:
-        _switch_active_thread(str(selected))
-        st.rerun()
+    st.sidebar.selectbox(
+        "Active conversation",
+        thread_ids,
+        index=None if "thread-picker" in st.session_state else index,
+        key="thread-picker",
+        on_change=_select_active_thread,
+    )
 
     col1, col2 = st.columns(2) if chat_mode else st.sidebar.columns(2)
     with col1:
@@ -849,27 +884,12 @@ def _render_runtime_timeline(limit: int = 30) -> None:
     st.dataframe(rows, use_container_width=True)
 
 
-def _build_bot() -> DadBot:
-    class MinimalSafetyService:
-        def tick(self, context: Any = None) -> dict[str, Any]:
-            return {"status": "ok"}
-
-    class MinimalMaintenanceService:
-        def tick(self, context: Any = None) -> dict[str, Any]:
-            return {"status": "ok"}
-
+def _build_bot(tenant_id: str) -> DadBot:
     runtime_config = DadRuntimeConfig()
-    config = DadBotConfig(runtime_config=runtime_config)
+    config = DadBotConfig(runtime_config=runtime_config, tenant_id=tenant_id)
     model_name = config.llm_model
 
-    from dadbot.core.interfaces import HealthService
     from dadbot.registry import ServiceRegistry
-
-    class StrictHealthService(HealthService):
-        def tick(self, context: Any = None):
-            return {"status": "ok"}
-
-    context_service = StreamlitContextService()
 
     bot = DadBot(
         model_name=model_name,
@@ -881,10 +901,9 @@ def _build_bot() -> DadBot:
     registry = ServiceRegistry.boot(
         config_path="config.yaml", bot=bot, registry=canonical_service_container.registry,
     )
-    registry.register("health", StrictHealthService())
+    context_service = StreamlitContextService(bot, context_service=registry.get("context_service"))
     registry.register("context_service", context_service)
-    registry.register("maintenance_service", MinimalMaintenanceService())
-    registry.register("safety_service", MinimalSafetyService())
+    registry.register("memory", context_service)
     mcp_service = MCPApprovalService(bot)
     registry.register("mcp_tool_service", mcp_service)
     canonical_persistence = registry.get("persistence_service")
@@ -899,8 +918,7 @@ def _build_bot() -> DadBot:
         bot.prompt_assembly = PromptAssemblyManager(DadBotContext.from_runtime(bot))
     registry.register("reflection", StreamlitReflectionService(bot, internal_state_manager))
 
-    setattr(bot, "_streamlit_thread_store", SQLiteStreamlitThreadStore())
-    context_service.bot = bot
+    setattr(bot, "_streamlit_thread_store", SQLiteStreamlitThreadStore(tenant_id=config.tenant_id))
 
     with suppress(Exception):
         profile_path = getattr(runtime_config, "profile_path", None)
@@ -915,7 +933,12 @@ def _build_bot() -> DadBot:
     return bot
 
 
-_STREAMLIT_RUNTIME_BUILD = "2026-11-06-canonical-chat-v16"
+@st.cache_resource(show_spinner=False, on_release=StreamlitBotPool.close)
+def _runtime_pool() -> StreamlitBotPool:
+    return StreamlitBotPool()
+
+
+_STREAMLIT_RUNTIME_BUILD = "2026-11-11-audited-approvals-ui-v21"
 
 st.set_page_config(
     page_title="DadBot",
@@ -924,11 +947,12 @@ st.set_page_config(
     initial_sidebar_state="expanded",
 )
 
-if "bot" not in st.session_state:
-    st.session_state.bot = _build_bot()
-    st.session_state._streamlit_runtime_build = _STREAMLIT_RUNTIME_BUILD
-elif str(st.session_state.get("_streamlit_runtime_build") or "") != _STREAMLIT_RUNTIME_BUILD:
-    st.session_state.bot = _build_bot()
+if "bot" not in st.session_state or st.session_state.get("_streamlit_runtime_build") != _STREAMLIT_RUNTIME_BUILD:
+    previous_bot = st.session_state.get("bot")
+    if previous_bot is not None and not getattr(previous_bot, "_streamlit_managed_shared", False):
+        previous_bot.shutdown()
+    tenant_id = DadBotConfig().tenant_id
+    st.session_state.bot = _runtime_pool().get(tenant_id, _STREAMLIT_RUNTIME_BUILD, _build_bot)
     st.session_state._streamlit_runtime_build = _STREAMLIT_RUNTIME_BUILD
 
 _ensure_ui_runtime_state()
@@ -945,11 +969,25 @@ def _process_user_message_with_thread(
     *,
     source_mode: bool = False,
 ):
-    messages = serialize_thread_messages(_thread_messages(), user_input)
-    setattr(bot, "_streamlit_context_messages", messages)
-    if source_mode:
-        return bot.process_user_message(user_input, attachments=attachments, source_mode=True)
-    return bot.process_user_message(user_input, attachments=attachments)
+    with streamlit_turn_lock(bot):
+        thread_id = _active_thread_id()
+        set_runtime_thread_id(bot, thread_id)
+        bot._streamlit_active_thread_id = thread_id
+        bot._streamlit_context_messages = serialize_thread_messages(_thread_messages(), user_input)
+        try:
+            if source_mode:
+                return bot.process_user_message(user_input, attachments=attachments, source_mode=True)
+            return bot.process_user_message(user_input, attachments=attachments)
+        finally:
+            bot._streamlit_context_messages = []
+
+
+def _resolve_pending_mcp_approval(service: Any, *, approved: bool) -> str:
+    with streamlit_turn_lock(bot):
+        thread_id = _active_thread_id()
+        set_runtime_thread_id(bot, thread_id)
+        bot._streamlit_active_thread_id = thread_id
+        return asyncio.run(service.resolve_mcp_approval(thread_id, approved=approved))
 
 
 avatar_path = Path("static/assets/dad_avatar.jpg")
@@ -1027,16 +1065,12 @@ if page == "Chat":
             approve_col, reject_col = st.columns(2)
             if approve_col.button("Approve this action", key=f"mcp-approve-{pending_approval.request_id}"):
                 with st.spinner("Revalidating and executing the approved action..."):
-                    approval_reply = asyncio.run(
-                        mcp_service.resolve_mcp_approval(_active_thread_id(), approved=True)
-                    )
+                    approval_reply = _resolve_pending_mcp_approval(mcp_service, approved=True)
                 approval_reply = bot.reply_finalization.normalize_reply(approval_reply)
                 _append_chat_message("assistant", approval_reply, stamp=_now_stamp())
                 st.rerun()
             if reject_col.button("Reject this action", key=f"mcp-reject-{pending_approval.request_id}"):
-                approval_reply = asyncio.run(
-                    mcp_service.resolve_mcp_approval(_active_thread_id(), approved=False)
-                )
+                approval_reply = _resolve_pending_mcp_approval(mcp_service, approved=False)
                 approval_reply = bot.reply_finalization.normalize_reply(approval_reply)
                 _append_chat_message("assistant", approval_reply, stamp=_now_stamp())
                 st.rerun()

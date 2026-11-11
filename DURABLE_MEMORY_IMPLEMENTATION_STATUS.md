@@ -1,6 +1,84 @@
 # Durable memory implementation status
 
-Status: **incomplete; not ready to commit or push**.
+Status: **local file-WAL memory activated and verified; broader release acceptance remains incomplete**.
+
+## Local-first indexed mutation increment
+
+- File-WAL authority with SQLite projections now accepts memory additions,
+  updates, staged saves, and clears. The tenant revision is appended and
+  fsynced before publication, snapshot repair, and derived-index repair.
+  Existing revision, ownership, and uncertain-append fences remain enforced.
+- Graph and semantic repairs run independently using the existing fenced
+  publication paths. A failed repair does not roll back committed memory:
+  the mutation raises an explicit committed-revision/repair-required error
+  and further writes are blocked until restart and ledger recovery.
+- Projection status is ledger-backed. Replay marks a publication dirty when a
+  later committed catalog changes its tracked sections, even if the process
+  died before recording repair status. Unrelated memory fields do not dirty
+  the indexes. Equal attempt generations are ordered by ledger event order.
+  These are repair-attempt generations, not physical index publication IDs.
+- Graph reads use the committed catalog while turn-local updates remain
+  staged. They neither discard those updates nor expose uncommitted graph
+  facts. Stale revisions are still rejected by the existing full-state fence.
+- Local authoritative SQLite files are tenant-qualified using a full tenant
+  hash in the filename. Legacy unqualified caches are left untouched and
+  rebuilt from committed memory, not imported as authority. Non-SQLite
+  indexed mutation backends remain explicitly rejected in this local-first
+  path. Non-authoritative runtime paths are unchanged.
+- New tests cover add/update/delete/clear, staged saves, independent repair
+  failures, revision-preserving restart, termination after append and during
+  graph/semantic repair, dirty-status replay, same-path tenant isolation,
+  and preservation of unowned legacy indexes.
+- After explicit backup-first approval, the tenant-owned PostgreSQL memory
+  snapshot was exported, fsynced, and verified by readback before activation.
+  Its initial WAL state matched the source exactly. The local profile now
+  uses file-WAL authority and tenant-qualified SQLite projections while
+  preserving PostgreSQL snapshots. Unowned legacy archives were not imported
+  or reassigned.
+  `DADBOT_MEMORY_INDEX_BACKEND=sqlite` selects local projections independently
+  of the snapshot-service backend; `auto` preserves existing selection.
+  PostgreSQL authority, shared non-SQLite index isolation, physical publication
+  generations, embedding integrity, retention/compaction, and the full
+  deployment acceptance matrix are not certified by this increment.
+
+### Validation
+
+- The latest ten-file local-memory/graph selection passed with
+  **218 passed, 13 skipped**. It covers local mutations, durable repair status,
+  tenant restore, semantic repair failures, tenant ledger replay,
+  establishment, boot ordering, the memory manager, semantic determinism,
+  and bitemporal graph edges. The earlier nine-file milestone was
+  **188 passed, 13 skipped**; these overlapping counts must not be added.
+- Live activation initially exposed a graph-read conflict with staged turn
+  memory. A two-case regression reproduced it before the fix; graph reads now
+  use committed sources without discarding staged changes or weakening the
+  revision fence. Two identical browser prompts then returned successful
+  replies in **2.893 and 2.913 seconds**. These are synthetic greeting checks,
+  not a general latency guarantee.
+- After the real turns, the PostgreSQL snapshot matched committed WAL memory
+  exactly, both tenant-qualified SQLite files passed `PRAGMA quick_check`,
+  and durable repair status remained current for the required source
+  revisions. A controlled restart preserved tenant revision 10 and the exact
+  memory state hash, rebuilt both projections from revision 10, and restored
+  both test replies when their thread was reselected. A further successful
+  post-restart reply took **6.603 seconds**. Active-thread reload selection
+  still resets to `default` and remains part of the UI consistency increment.
+- Use a short, task-owned `--basetemp` on Windows. A longer session-directory
+  test path exceeded Windows path limits when combined with tenant evidence
+  filenames; rerunning under a shorter temporary path passed.
+- The additional backend-configuration and chat-options selection passed
+  with **84 passed, 1 skipped**, including unset/default backend selection,
+  explicit SQLite selection with or without a PostgreSQL snapshot DSN,
+  and invalid-value rejection.
+- The modified memory regression files pass Ruff. UTF-8 baseline comparison
+  found no introduced Ruff findings in the local memory implementation.
+  Legacy source diagnostics remain; this is not a clean repository-wide
+  lint or type-check result.
+- Pylance syntax checks passed for the local storage, establishment, and
+  configuration changes.
+
+The following sections record earlier work and limitations; their historical
+test counts are not the validation result for the increment above.
 
 ## D2.6: local semantic candidate publication (incomplete)
 
@@ -26,8 +104,10 @@ Status: **incomplete; not ready to commit or push**.
   -q --runxfail -o addopts='' --basetemp=.pytest_tmp_d26_broad`:
   **132 passed, 13 skipped**. Ruff F/E9 and Pylance syntax checks passed.
   `git diff --check` reported the existing LF/CRLF warning.
-- D2.6 is **not complete**. There is no durable per-tenant projection metadata
-  or generation protocol. The shared SQLite semantic table has a global
+- D2.6 remains broader than the local-first increment. Durable repair status
+  and tenant-qualified local SQLite files are now implemented, but there is
+  no physical index publication-generation protocol. An unqualified shared
+  SQLite semantic table has a global
   summary-key primary key, and its reads, deletes, and clears are not
   tenant-scoped: sharing the physical index between tenants is unsafe.
   The transactional index comparison is not tenant isolation. The graph
@@ -35,8 +115,9 @@ Status: **incomplete; not ready to commit or push**.
   storage isolation has not been established. The new non-blocking path is
   specific to local authority with SQLite; other backend paths retain their
   previous behavior. Hash verification does not validate embedding integrity.
-  Indexed-mutation safeguards remain in place. The required metadata,
-  cross-tenant, and fresh-process acceptance matrix remains unfulfilled.
+  Non-SQLite indexed-mutation safeguards remain in place. Local SQLite
+  cross-tenant and indexed-mutation crash tests are now implemented; the
+  complete multi-backend acceptance matrix remains unfulfilled.
 
 ## Completed work and current limitations
 
@@ -55,9 +136,14 @@ Status: **incomplete; not ready to commit or push**.
   so that load-time rejection remains tested.
 
 None of the six end-to-end implementation and acceptance phases is complete.
-In particular, ledger primitives are not yet the application's memory authority.
+File-WAL tenant events can now be the application's local memory authority;
+this is enabled in the running local profile after explicit migration approval.
+Full production acceptance and migration of unowned historical archives remain
+separate work.
 
-## Current changed files
+## Historical changed-file inventory
+
+This inventory describes the earlier implementation, not the current worktree.
 
 Tracked changes: `README.md`, `dadbot/base/_memory_lifecycle_mixin.py`,
 `dadbot/core/boot_mixin.py`, `dadbot/core/compaction.py`,

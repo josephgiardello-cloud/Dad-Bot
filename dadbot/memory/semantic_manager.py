@@ -74,7 +74,9 @@ class SemanticIndexManager:
                     "PGVector semantic index unavailable, falling back to SQLite: %s",
                     exc,
                 )
-        return SQLiteSemanticIndex(self._bot, self._bot.semantic_memory_db_path)
+        from dadbot.core.local_tenant_establishment import local_projection_path
+
+        return SQLiteSemanticIndex(self._bot, local_projection_path(self._bot, self._bot.semantic_memory_db_path))
 
     def ensure_semantic_memory_db(self):
         self._semantic_index_backend.ensure_storage()

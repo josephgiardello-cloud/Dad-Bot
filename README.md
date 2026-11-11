@@ -571,6 +571,10 @@ generation; validation failures remain explicit refusals, never device success.
 
 Every proposed MCP call pauses for explicit approval in the Chat page. The UI shows the exact tool name and validated arguments; each call in a multi-call plan requires a separate approval. Before an approved call is sent, Dad-Bot rechecks the live server's allowlist and input schema. Rejecting a call sends no request, and new chat input is held while an approval is pending in that conversation.
 
+The UI records proposals, decisions, dispatch starts, and outcomes in its canonical execution ledger, scoped by tenant, thread, trace, and approval ID. Audit events store input/output hashes, not raw arguments or tool results. A proposal or pre-dispatch audit failure blocks the action. A timeout, cancellation, tool error, or missing completion record after dispatch leaves an uncertain outcome; it is never automatically retried. Pending and approved-but-undispatched proposals expire when the runtime restarts; an interrupted dispatched call becomes uncertain rather than being sent again. An in-memory execution ledger does not make these records durable across process exit.
+
+This is the approval/audit foundation, not complete planner/kernel/MCP unification: kernel tool-IO replay, external-effect reconciliation, durable retry queues, and live calendar/Home Assistant/notification acceptance remain separate work.
+
 The MCP loop returns the model's validated final answer, prompted in the Dad persona, rather than raw tool payloads or unparsed plans. If model finalization fails after tool execution, it reports that failure and warns that device actions may already have occurred; it does not claim success or fall back to a "no action performed" reply. This protection does not depend on Streamlit reply normalization.
 
 ### Authenticated local MCP server
@@ -669,13 +673,27 @@ No sanitized product screenshots are currently included. Capture demo views usin
 
 ### Local chat model and streaming
 
-The default chat model is `qwen3.5:9b`. Explicit model selections and generation options are preserved; the runtime does not disable thinking or override the context window. Actual GPU usage and latency depend on the model, prompt, attachments, and other running applications.
+The default chat model is `qwen3.5:9b`. Explicit model selections and generation options are preserved. Set `DADBOT_OLLAMA_CHAT_THINK=false` before startup to disable thinking for ordinary Ollama chat; unset or `auto` preserves the model default, and `true` enables thinking. Explicit per-call settings win, and this default does not change safety, planning, or reflection calls. Actual GPU usage and latency depend on the model, prompt, attachments, and other running applications.
 
 Existing profile model choices are not overwritten. If a saved profile selects another model, update its `llm.model` field to `qwen3.5:9b` and restart the app. `DADBOT_LLM_MODEL` can set the default; CLI `--model` and service `DADBOT_DEFAULT_MODEL` overrides remain available.
 
 Chat, Status probes, Workshop probes, and outbox retries call the canonical `process_user_message` entrypoint and validate replies through shared reply finalization. Chat displays, saves, and speaks only the finalized reply; it does not run a separate UI model executor or expose planning JSON as drafts. New chat and Duplicate controls are in the main chat column, and the conversation selector follows the new thread.
 
 The Streamlit runtime boots orchestration services into the bot's existing manager registry, then registers its UI adapters there. The service container, orchestrator, graphs, and persistence aliases share that registry. `ServiceRegistry.boot()` creates a new registry by default; passing `registry=existing` populates and returns that exact instance.
+
+Streamlit retains the canonical safety and maintenance services, including their `safety` and `health` aliases. Ordinary turns run scheduled proactive jobs; source mode skips them. Maintenance failures are logged and reported as degraded, not always-OK ticks. Durable synthesis remains post-commit, never part of the health hot path.
+
+Its context adapter also retains the canonical memory evaluation, snapshot, provenance, and retrieval sections, then adds visible thread messages. Both `context_service` and `memory` refer to that adapter. Context retrieval reuses the memory manager's configured semantic backend, including tenant-qualified SQLite paths under local WAL authority, rather than opening a separate unqualified index.
+
+Browser reconnects reuse one runtime per configured tenant within the Streamlit process rather than opening competing WAL writers. A dedicated reentrant UI admission lock serializes thread selection, turn context, approvals, and media model overrides; the internal session lock is not held across the canonical worker-thread bridge. Version replacement closes the old runtime before publishing its replacement. Media surfaces bind to the same bot and the tab's thread without disabling strict graph mode or using the legacy greeting fast path. Multiple server processes still require separate coordination and are not covered by this local runtime pool.
+
+New turns bind the active tenant and selected thread into the canonical request, jobs, checkpoints, and audit events. Explicit retry/replay contexts retain their original identity. Policy/capability traces and Merkle anchors accept the canonical top-level session metadata as well as the older nested control-plane form; a non-default UI thread must not execute or audit as `default`.
+
+Visible conversation history is stored separately in `session_logs/streamlit_threads.sqlite3` (override with `DADBOT_STREAMLIT_STATE_DB`), keyed by tenant and thread. New and duplicated threads are saved immediately, including empty threads. Each tab keeps its selected conversation in the `thread` URL parameter, so reloads and server restarts restore that selection without a shared last-selected preference. The URL is a selector, not an ownership credential; unavailable threads produce a warning instead of creating or exposing history.
+
+Unqualified legacy `chat_threads` rows are not imported automatically. Back up and verify the database before explicitly assigning reviewed history to its configured tenant in `owned_chat_threads`; do not infer ownership from a thread name or URL. Corrupt stored history raises an explicit error rather than silently becoming an empty conversation. Generated audio is not stored. UI outbox retries and toggle preferences remain browser-session-local; concurrent multi-user operation is not certified by the reload tests.
+
+Local-WAL graph refresh reads committed tenant sources even when runtime state has staged changes; it neither publishes those changes nor relaxes stale-revision checks. The local UI acceptance pass verifies canonical memory snapshots and a green runtime-health record after a real turn. This does not certify every deployment or external integration. An unconfigured optional EventTap still reports its separate checkpoint limitation; canonical graph checkpoint persistence does not depend on that tap.
 
 ### Environment Setup
 
@@ -726,6 +744,39 @@ and reranker firing rate. Set `DADBOT_RUN_REAL_EMBEDDING_BENCHMARK=1` to run
 its real local Ollama embedding cases; those cases need `nomic-embed-text`.
 
 ### Current memory persistence authority
+
+**Opt-in local file-WAL authority:** With
+`DADBOT_DURABLE_EXECUTION_LEDGER=1` and
+`DADBOT_EXECUTION_LEDGER_BACKEND=file`, an established tenant's committed
+memory catalog is authoritative. Indexed additions, updates, staged saves,
+and clears commit the tenant revision before repairing snapshots, graph,
+and semantic indexes. Repairs use revision fences and run independently.
+A post-commit repair failure is reported explicitly, preserves committed
+memory, and blocks further writes until restart/recovery. Startup replays
+the catalog and repairs derived stores; durable status replay identifies
+dirty indexes even when a crash interrupted status recording.
+Graph reads project the committed catalog rather than staged turn memory.
+This preserves pending updates for SaveNode without leaking them into graph
+context or weakening the tenant revision fence.
+
+This local-first indexed-write path requires SQLite projections. Set
+`DADBOT_MEMORY_INDEX_BACKEND=sqlite` to select them without changing PostgreSQL
+snapshot persistence; unset or `auto` preserves the existing backend selection.
+Invalid backend values fail configuration validation. Their
+configured filenames gain `.tenant-<full-tenant-hash>` before the extension,
+so different tenants do not share an index. Existing unqualified caches are
+preserved and rebuilt from the ledger rather than trusted as migration input.
+Other indexed backends remain rejected in this path. Do not enable authority
+on existing unowned memory snapshots without a reviewed migration: startup
+requires tenant ownership evidence and does not infer it from a shared file.
+Once established, disabling or switching the ledger is rejected; recovery
+must preserve WAL authority rather than overwrite it with a snapshot.
+Physical publication generations and the full release/recovery matrix remain
+separate acceptance work. See
+[durable memory implementation status](./DURABLE_MEMORY_IMPLEMENTATION_STATUS.md).
+
+**Without established file-WAL authority**, the following snapshot-first
+behavior applies:
 
 The configured tenant document store is the primary memory snapshot when it is
 durable; with a composite Redis/Postgres store, Postgres is primary. In the
@@ -997,26 +1048,37 @@ the reversible archive can grow; there is no automatic archive retention limit.
 
 ### Local Model Context and Timing
 
-Ollama requests allocate `num_ctx` in power-of-two buckets starting at 512
-(512, 1024, 2048, 4096, 8192, and larger when requested), capped by the
-model's context capacity. The prompt guard still uses DadBot's configured
-`CONTEXT_TOKEN_BUDGET` (default 6000) or the request's explicit budget, capped
-by the model's capacity; bucketing does not expand the allowed prompt.
-Thus a 6000-token budget allocates an 8192-token context when supported,
-using more KV-cache memory than an unbucketed allocation.
+Ollama requests use DadBot's configured `CONTEXT_TOKEN_BUDGET` (default 6000)
+or the request's explicit `num_ctx`, capped by the model's context capacity.
+There is no power-of-two rounding: a 6000-token budget requests 6000 tokens.
 A Modelfile's default `num_ctx` is not treated as the architectural capacity.
 Before transport, the prompt guard drops older history and trims oversized
 messages, preserving the latest task where possible. Thinking-capable models
-reserve at least 3072 tokens for generation, capped at half the request window;
-other models use `RESERVED_RESPONSE_TOKENS` (minimum 64).
+reserve at least 3072 tokens for generation, capped at half the request window,
+unless the effective request explicitly disables thinking. Non-thinking
+requests use `RESERVED_RESPONSE_TOKENS` (minimum 64), also capped at half the
+window. Invalid `DADBOT_OLLAMA_CHAT_THINK` values fail configuration validation.
 
 Reasoning-only responses that end with `done_reason=length` raise an explicit
-budget-exhaustion error rather than succeeding with an empty answer. This
+budget-exhaustion error rather than succeeding with an empty answer. Other
+empty completions also fail at the transport boundary with completion reason
+and token counts; hidden reasoning is never substituted for the answer. This
 does not guarantee unlimited reasoning fits; increase the configured context
 within available memory when necessary. INFO-level Ollama timing logs include
 request purpose, token counts, load/generation durations, and completion reason,
 but not prompt, answer, or hidden-reasoning text. Mood detection, tool planning,
 and chat can each incur a separate generation.
+Canonical live-turn logs additionally report wall time and success/error status
+through checkpoint completion; they do not include the conversation text.
+Concurrent runtime builds serialize Chroma client construction so another
+browser session cannot observe a shared Rust backend before startup completes.
+
+Live conversational confluence keys include request identity as well as
+tenant, session, wording, and attachments. Repeating the same wording in a new
+request is valid. Retrying an existing request preserves its identity and
+cached committed result; explicitly reusing its confluence key still enforces
+the original execution contract. The request factory allocates an identity
+once when the caller has not supplied one.
 
 Chat requests use `keep_alive=-1` by default. Set
 `DADBOT_OLLAMA_KEEP_ALIVE_SECONDS=300` before startup to restore a five-minute
@@ -1102,14 +1164,14 @@ Anything beyond those lanes should be treated as supplemental, not mandatory.
 
 | Capability | Maturity | Evidence |
 |---|---|---|
-| Core local chat + memory pipeline | Available, with UI limitations | `dadbot/core/dadbot.py`, `dadbot/core/turn_mixin.py`, `dadbot/core/graph.py`; the Streamlit sample currently uses no-op turn-event/checkpoint persistence services. Profile and memory storage are separate. |
+| Core local chat + memory pipeline | Available; durability depends on configured backends | `dadbot/core/dadbot.py`, `dadbot/core/turn_mixin.py`, `dadbot/core/graph.py`; Streamlit uses canonical turn/checkpoint persistence and tenant-scoped local display history. Profile and memory storage are separate. |
 | Captured voice-to-reply path | Partial; full-duplex streaming not certified | `dadbot/speech/voice_loop.py`, `dadbot/ui/media/service.py`, `[project.optional-dependencies].voice` |
 | Local reminders + local calendar events | Shipped (local storage) | `dadbot/agentic.py` (`add_reminder`, `add_calendar_event`, `list_calendar_events`) |
 | Calendar feed synchronization | Partial | `dadbot/core/boot_mixin.py` (`ical_feed_url`, `schedule_calendar_sync`) |
 | Proactive heartbeat/nudges | Partial | `dadbot/core/boot_mixin.py` (`_run_proactive_heartbeat_loop`), `dadbot/assistant_runtime.py` |
 | Avatar rendering support | Partial | `dad_streamlit.py`, `pyproject.toml` (`[project.optional-dependencies].heritage`) |
 
-The Streamlit runtime is a development/demo composition, not the durable service profile: its turn-event and checkpoint persistence methods are no-ops, and its event bus is in-memory. Do not treat those records as restart-durable.
+Streamlit uses canonical turn-event and checkpoint persistence; restart durability depends on the selected ledger and storage backends, not merely launching the UI. Its display-history SQLite store is not a substitute for the memory authority or a durable event bus. Browser retry queues and toggles are still session-local. Full deployment, concurrent-user, voice-interruption, and external-tool acceptance gates remain separate.
 
 ### Docker (Dev & Production)
 

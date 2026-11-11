@@ -210,7 +210,17 @@ semantic.sync_semantic_memory_index(state["memories"])
     verify = r"""
 import os
 import sqlite3
-with sqlite3.connect(os.environ["DADBOT_SEMANTIC_DB_PATH"]) as connection:
+from pathlib import Path
+from types import SimpleNamespace
+from dadbot.core.execution_ledger import ExecutionLedger
+from dadbot.core.ledger_backend import FileWALLedgerBackend
+from dadbot.core.local_tenant_establishment import local_projection_path
+ledger = ExecutionLedger(FileWALLedgerBackend(Path(os.environ["DADBOT_SESSION_LOG_DIR"]) / "execution_ledger.jsonl"))
+ledger.load_from_backend()
+tenant_id = next(event["payload"]["tenant_id"] for event in ledger.read() if event["type"] == "TENANT_MEMORY_COMMITTED")
+owner = SimpleNamespace(config=SimpleNamespace(tenant_id=tenant_id), _execution_ledger=ledger)
+index_path = local_projection_path(owner, os.environ["DADBOT_SEMANTIC_DB_PATH"])
+with sqlite3.connect(index_path) as connection:
     keys = [row[0] for row in connection.execute("SELECT summary_key FROM semantic_memories")]
 assert len(keys) == 1 and any("old" in key.lower() for key in keys), keys
 from dadbot.memory.semantic_manager import SemanticIndexManager

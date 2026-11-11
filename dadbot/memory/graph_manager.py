@@ -85,7 +85,9 @@ class MemoryGraphManager:
                 )
         # Only access graph_store_db_path if present
         db_path = getattr(self._bot, 'graph_store_db_path', ':memory:')
-        return SQLiteGraphStore(self._bot, db_path)
+        from dadbot.core.local_tenant_establishment import local_projection_path
+
+        return SQLiteGraphStore(self._bot, local_projection_path(self._bot, db_path))
 
     def ensure_graph_store(self):
         self._graph_store_backend.ensure_storage()
@@ -1018,9 +1020,9 @@ Text: {summary}
             raise RuntimeError("TemporalNode required ΓÇö execution invalid")
         return temporal
 
-    def _project_consolidated_memories(self, node_map, edge_map, *, turn_context=None):
+    def _project_consolidated_memories(self, node_map, edge_map, *, entries, turn_context=None):
         temporal = self._require_turn_temporal(turn_context)
-        for entry in self._mm.consolidated_memories():
+        for entry in entries:
             if bool(entry.get("superseded", False)):
                 continue
             summary = str(entry.get("summary", "")).strip()
@@ -1128,9 +1130,9 @@ Text: {summary}
                     excerpt=contradiction,
                 )
 
-    def _project_archive_sessions(self, node_map, edge_map, *, turn_context=None):
+    def _project_archive_sessions(self, node_map, edge_map, *, entries, turn_context=None):
         temporal = self._require_turn_temporal(turn_context)
-        for entry in self._mm.session_archive():
+        for entry in entries:
             summary = str(entry.get("summary", "")).strip()
             updated_at = str(
                 entry.get("created_at") or getattr(temporal, "wall_time", ""),
@@ -1211,9 +1213,9 @@ Text: {summary}
                     excerpt=summary,
                 )
 
-    def _project_persona_traits(self, node_map, edge_map, *, turn_context=None):
+    def _project_persona_traits(self, node_map, edge_map, *, entries, turn_context=None):
         temporal = self._require_turn_temporal(turn_context)
-        for entry in self._mm.persona_evolution_history():
+        for entry in entries:
             trait = str(entry.get("trait", "")).strip()
             if not trait:
                 continue
@@ -1282,9 +1284,9 @@ Text: {summary}
                     excerpt=reason,
                 )
 
-    def _project_life_patterns(self, node_map, edge_map, *, turn_context=None):
+    def _project_life_patterns(self, node_map, edge_map, *, entries, turn_context=None):
         temporal = self._require_turn_temporal(turn_context)
-        for entry in self._mm.life_patterns():
+        for entry in entries:
             summary = str(entry.get("summary", "")).strip()
             updated_at = str(
                 entry.get("last_seen_at") or getattr(temporal, "wall_time", ""),

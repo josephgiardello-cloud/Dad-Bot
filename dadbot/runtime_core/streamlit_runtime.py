@@ -30,15 +30,16 @@ class UIRuntimeAPI:
     behavior to the current DadBot runtime facade.
     """
 
-    def __init__(self, bot: DadBot) -> None:
+    def __init__(self, bot: DadBot, *, thread_id: str | None = None) -> None:
         self._bot = bot
+        self._thread_id = thread_id
 
     def active_chat_thread(self):
         # Defensive: return the current active thread or a default
         if self._bot is None:
             return {"thread_id": "default"}
         if hasattr(self._bot, "active_thread_id"):
-            thread_id = getattr(self._bot, "active_thread_id", None) or "default"
+            thread_id = self.active_thread_id
             # Try to return a thread dict if available
             snapshots = getattr(self._bot, "thread_snapshots", None)
             if not isinstance(snapshots, dict):
@@ -50,6 +51,8 @@ class UIRuntimeAPI:
         return {"thread_id": "default"}
 
     def __getattr__(self, name: str) -> Any:
+        if name == "active_thread_id" and self._thread_id is not None:
+            return self._thread_id
         if name == "get_view":
             return self._compat_get_view
         return getattr(self._bot, name)
@@ -315,7 +318,7 @@ class UIRuntimeAPI:
             events = list(ledger_reader().read())
         except Exception:
             return []
-        current_session = str(getattr(self._bot, "active_thread_id", "") or "default")
+        current_session = str(self.active_thread_id or "default")
         current_tenant = str(getattr(getattr(self._bot, "config", None), "tenant_id", "") or "").strip()
         rows: list[dict[str, Any]] = []
         for event in reversed(events):
@@ -438,11 +441,14 @@ class UIRuntimeAPI:
 
 
 class StreamlitRuntime:
+    canonical_ui: bool = False
 
-    def __init__(self, bot: DadBot) -> None:
+    def __init__(self, bot: DadBot, *, canonical_ui: bool = False, thread_id: str | None = None) -> None:
         self.bot = bot
-        self._configure_ui_runtime_mode()
-        self.api = UIRuntimeAPI(bot)
+        self.canonical_ui = canonical_ui
+        if not canonical_ui:
+            self._configure_ui_runtime_mode()
+        self.api = UIRuntimeAPI(bot, thread_id=thread_id)
 
     def _configure_ui_runtime_mode(self) -> None:
         """Keep the Streamlit surface resilient when graph execution encounters transient failures."""
@@ -496,6 +502,19 @@ class StreamlitRuntime:
         attachments: list[dict] | None = None,
         metadata: dict | None = None,
     ) -> dict:
+        if self.canonical_ui:
+            from dadbot.ui.streamlit_context import set_runtime_thread_id, streamlit_turn_lock
+
+            with streamlit_turn_lock(self.bot):
+                set_runtime_thread_id(self.bot, thread_id)
+                self.bot._streamlit_active_thread_id = thread_id
+                self.bot._streamlit_context_messages = []
+                return self.api.send_user_message(
+                    thread_id=thread_id,
+                    content=content,
+                    attachments=attachments,
+                    metadata={**dict(metadata or {}), "disable_fast_path": True},
+                )
         return self.api.send_user_message(
             thread_id=thread_id,
             content=content,

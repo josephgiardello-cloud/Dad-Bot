@@ -140,6 +140,96 @@ def test_residency_config_reads_environment_and_rejects_invalid_values(monkeypat
         DadRuntimeConfig()
 
 
+@pytest.mark.parametrize(("value", "expected"), [("auto", None), ("true", True), ("false", False)])
+def test_chat_thinking_configuration_is_validated(monkeypatch, value, expected):
+    monkeypatch.setenv("DADBOT_OLLAMA_CHAT_THINK", value)
+    assert DadRuntimeConfig().ollama_chat_think is expected
+    monkeypatch.setenv("DADBOT_OLLAMA_CHAT_THINK", "invalid")
+    with pytest.raises(ValueError, match="DADBOT_OLLAMA_CHAT_THINK"):
+        DadRuntimeConfig()
+
+
+@pytest.mark.parametrize("method", [
+    "sync", "explicit", "async", "stream", "async_stream", "async_native", "async_stream_native",
+])
+@pytest.mark.parametrize(("configured", "explicit", "expected"), [
+    (None, None, None), (False, None, False), (True, None, True),
+    (False, True, True), (True, False, False),
+])
+def test_chat_thinking_setting_reaches_every_transport(monkeypatch, method, configured, explicit, expected):
+    manager, guarded_calls = _manager()
+    manager.bot.runtime_config.ollama_chat_think = configured
+    manager.bot.model_runtime.ollama_show_payload = lambda _model: {"capabilities": ["thinking"]}
+    manager.bot.STREAM_TIMEOUT_SECONDS = 30
+    manager.bot.STREAM_MAX_CHARS = 100
+    calls = []
+
+    def chat(**kwargs):
+        calls.append(kwargs)
+        payload = {"message": {"content": "ok"}, "done_reason": "stop"}
+        return (item for item in [payload]) if kwargs.get("stream") else payload
+
+    monkeypatch.setattr(manager, "_call_ollama_sync", chat)
+    async def async_chat(**kwargs):
+        if kwargs.get("stream"):
+            async def chunks():
+                for item in chat(**kwargs):
+                    yield item
+            return chunks()
+        return chat(**kwargs)
+
+    native = SimpleNamespace(chat=async_chat) if method.endswith("_native") else None
+    monkeypatch.setattr(manager, "ollama_async_client", lambda: native)
+    messages = [{"role": "user", "content": "hello"}]
+    with ModelGatewayScope.bind("ModelPort"):
+        target = {
+            "sync": manager.call_ollama_chat,
+            "explicit": manager.call_ollama_chat_with_model,
+            "async": manager.call_ollama_chat_async,
+            "stream": manager.call_ollama_chat_stream,
+            "async_stream": manager.call_ollama_chat_stream_async,
+        }[method.removesuffix("_native")]
+        args = ("test-model", messages) if method == "explicit" else (messages,)
+        result = target(*args, caller="ModelPort", think=explicit)
+        if method.startswith("async"):
+            asyncio.run(result)
+    assert len(calls) == 1
+    if expected is None:
+        assert "think" not in calls[0]
+    else:
+        assert calls[0]["think"] is expected
+    assert guarded_calls[0]["reserved_response_tokens"] == (900 if expected is False else 3000)
+
+
+def test_chat_thinking_default_does_not_change_planning_or_reflection():
+    manager, _ = _manager()
+    manager.bot.runtime_config.ollama_chat_think = False
+    assert manager._resolve_ollama_think(None, "tool planning") is None
+    assert manager._resolve_ollama_think(None, "reflection") is None
+    assert manager._resolve_ollama_think(False, "tool planning") is False
+
+
+@pytest.mark.parametrize("method", ["sync", "explicit", "async"])
+def test_empty_completed_response_fails_at_transport_boundary(monkeypatch, method, caplog):
+    manager, _ = _manager()
+    payload = {
+        "message": {"content": "", "thinking": "private reasoning"},
+        "done_reason": "stop", "prompt_eval_count": 100, "eval_count": 200,
+    }
+    monkeypatch.setattr(manager, "_call_ollama_sync", lambda **_kwargs: payload)
+    monkeypatch.setattr(manager, "ollama_async_client", lambda: None)
+    with caplog.at_level("INFO"), ModelGatewayScope.bind("ModelPort"):
+        with pytest.raises(RuntimeError, match="completed without a visible answer"):
+            if method == "sync":
+                manager.call_ollama_chat([], caller="ModelPort")
+            elif method == "explicit":
+                manager.call_ollama_chat_with_model("test-model", [], caller="ModelPort")
+            else:
+                asyncio.run(manager.call_ollama_chat_async([], caller="ModelPort"))
+    assert "private reasoning" not in caplog.text
+    assert "prompt_tokens=100" in caplog.text
+
+
 @pytest.mark.skipif(
     os.environ.get("DADBOT_RUN_REAL_OLLAMA_OPTIONS") != "1",
     reason="requires local Ollama and a downloaded chat model",

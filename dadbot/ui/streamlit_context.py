@@ -4,10 +4,61 @@ import json
 import os
 import sqlite3
 import threading
+from collections.abc import Callable, Iterator
 from contextlib import contextmanager
 from datetime import datetime
 from pathlib import Path
-from typing import Any, Iterator
+from typing import TYPE_CHECKING, Any
+
+if TYPE_CHECKING:
+    from dadbot.core.dadbot import DadBot
+    from dadbot.services.context_service import ContextService
+
+
+def streamlit_turn_lock(bot: Any) -> Any:
+    # The canonical sync path bridges into a worker that also needs _session_lock.
+    with bot._session_lock:
+        lock = getattr(bot, "_streamlit_turn_lock", None)
+        if lock is None:
+            lock = threading.RLock()
+            bot._streamlit_turn_lock = lock
+        return lock
+
+
+class StreamlitBotPool:
+    """Own one runtime per configured tenant across browser reconnects."""
+
+    def __init__(self) -> None:
+        self._lock = threading.RLock()
+        self._bots: dict[str, tuple[str, DadBot]] = {}
+
+    def get(self, tenant_id: str, build: str, factory: Callable[[str], DadBot]) -> DadBot:
+        from dadbot_system.execution_identity import require_scoped_tenant_id
+
+        tenant_id = require_scoped_tenant_id(tenant_id)
+        with self._lock:
+            current = self._bots.get(tenant_id)
+            if current is not None:
+                previous_build, previous_bot = current
+                if previous_build == build and not getattr(previous_bot, "_shutdown_completed", False):
+                    return previous_bot
+                with streamlit_turn_lock(previous_bot):
+                    previous_bot.shutdown()
+                del self._bots[tenant_id]
+            bot = factory(tenant_id)
+            if bot.config.tenant_id != tenant_id:
+                bot.shutdown()
+                raise ValueError("Streamlit runtime tenant does not match the requested owner")
+            bot._streamlit_managed_shared = True
+            self._bots[tenant_id] = (build, bot)
+            return bot
+
+    def close(self) -> None:
+        with self._lock:
+            for _, bot in self._bots.values():
+                with streamlit_turn_lock(bot):
+                    bot.shutdown()
+            self._bots.clear()
 
 
 def classify_profile_question(user_input: str) -> str:
@@ -118,10 +169,12 @@ def serialize_thread_messages(
 
 
 class StreamlitContextService:
-    def __init__(self, bot: Any = None) -> None:
+    def __init__(self, bot: Any = None, *, context_service: ContextService | None = None) -> None:
         self.bot = bot
+        self.context_service = context_service
 
     def build_context(self, turn_context: Any) -> dict[str, Any]:
+        context = self.context_service.build_context(turn_context) if self.context_service is not None else {}
         state = getattr(turn_context, "state", {})
         rich_context = state.get("rich_context") if isinstance(state, dict) else None
         messages = list(rich_context.get("messages") or []) if isinstance(rich_context, dict) else []
@@ -130,72 +183,88 @@ class StreamlitContextService:
         if not messages:
             history = getattr(self.bot, "conversation_history", None)
             if callable(history):
-                try:
-                    messages = list(history() or [])
-                except Exception:
-                    messages = []
+                messages = list(history() or [])
         temporal = dict(state.get("temporal") or {}) if isinstance(state, dict) else {}
-        return {"messages": messages, "temporal": temporal}
+        return {**context, "messages": messages, "temporal": context.get("temporal", temporal)}
 
 
 class SQLiteStreamlitThreadStore:
-    """Persist visible Streamlit threads locally without storing generated audio blobs."""
+    """Persist tenant-owned display history; unqualified legacy rows are never adopted."""
 
-    def __init__(self, db_path: str | Path | None = None) -> None:
-        configured_path = str(db_path or os.environ.get("DADBOT_STREAMLIT_STATE_DB") or "session_logs/streamlit_threads.sqlite3")
+    def __init__(self, db_path: str | Path | None = None, *, tenant_id: str) -> None:
+        from dadbot_system.execution_identity import require_scoped_tenant_id
+
+        self.tenant_id = require_scoped_tenant_id(tenant_id)
+        configured_path = str(
+            db_path or os.environ.get("DADBOT_STREAMLIT_STATE_DB") or "session_logs/streamlit_threads.sqlite3"
+        )
         self.db_path = Path(configured_path)
         self.db_path.parent.mkdir(parents=True, exist_ok=True)
         self._lock = threading.RLock()
         with self._connect() as connection:
             connection.execute(
-                "CREATE TABLE IF NOT EXISTS chat_threads ("
-                "thread_id TEXT PRIMARY KEY, messages_json TEXT NOT NULL, updated_at TEXT NOT NULL)"
+                "CREATE TABLE IF NOT EXISTS owned_chat_threads ("
+                "tenant_id TEXT NOT NULL, thread_id TEXT NOT NULL, "
+                "messages_json TEXT NOT NULL, updated_at TEXT NOT NULL, PRIMARY KEY (tenant_id, thread_id))"
             )
 
     @contextmanager
     def _connect(self) -> Iterator[sqlite3.Connection]:
-        connection = sqlite3.connect(self.db_path, timeout=10.0)
-        connection.row_factory = sqlite3.Row
-        try:
-            with connection:
-                yield connection
-        finally:
-            connection.close()
+        from dadbot_system.delegation import require_tenant_authority_if_active, tenant_mutation_fence
+
+        with tenant_mutation_fence(self.tenant_id, required=False):
+            require_tenant_authority_if_active(self.tenant_id)
+            connection = sqlite3.connect(self.db_path, timeout=10.0)
+            connection.row_factory = sqlite3.Row
+            try:
+                with connection:
+                    yield connection
+            finally:
+                connection.close()
 
     def load_threads(self) -> dict[str, list[dict[str, Any]]]:
         with self._lock, self._connect() as connection:
-            rows = connection.execute("SELECT thread_id, messages_json FROM chat_threads ORDER BY thread_id").fetchall()
+            rows = connection.execute(
+                "SELECT thread_id, messages_json FROM owned_chat_threads WHERE tenant_id=? ORDER BY thread_id",
+                (self.tenant_id,),
+            ).fetchall()
         threads: dict[str, list[dict[str, Any]]] = {}
         for row in rows:
             try:
-                messages = json.loads(str(row["messages_json"] or "[]"))
-            except (TypeError, ValueError):
-                messages = []
-            threads[str(row["thread_id"])] = [item for item in messages if isinstance(item, dict)]
+                messages = self._clean_messages(json.loads(row["messages_json"]))
+            except ValueError as exc:
+                raise ValueError(f"Invalid display history for thread {row['thread_id']}") from exc
+            threads[str(row["thread_id"])] = messages
         return threads
 
-    def save_thread(self, thread_id: str, messages: list[dict[str, Any]]) -> None:
+    @staticmethod
+    def _clean_messages(messages: Any) -> list[dict[str, str]]:
+        if not isinstance(messages, list):
+            raise ValueError("Display history must be a list of messages")
         cleaned = []
-        for item in list(messages or []):
-            if not isinstance(item, dict):
-                continue
-            role = str(item.get("role") or "").strip().lower()
-            text = str(item.get("text") or item.get("content") or "")
-            if role in {"user", "assistant"}:
-                cleaned.append(
-                    {
-                        "role": role,
-                        "text": text,
-                        "time": str(item.get("time") or ""),
-                    }
-                )
+        for item in messages:
+            if (
+                not isinstance(item, dict)
+                or item.get("role") not in ("user", "assistant")
+                or not isinstance(item.get("text"), str)
+                or not isinstance(item.get("time", ""), str)
+            ):
+                raise ValueError("Invalid display history message")
+            cleaned.append({"role": item["role"], "text": item["text"], "time": item.get("time", "")})
+        return cleaned
 
+    def save_thread(self, thread_id: str, messages: list[dict[str, Any]]) -> None:
+        if not isinstance(thread_id, str) or not thread_id:
+            raise ValueError("Display history requires a nonempty thread ID")
+        cleaned = self._clean_messages(messages)
         with self._lock, self._connect() as connection:
             connection.execute(
-                "INSERT INTO chat_threads(thread_id, messages_json, updated_at) VALUES (?, ?, ?) "
-                "ON CONFLICT(thread_id) DO UPDATE SET messages_json=excluded.messages_json, updated_at=excluded.updated_at",
+                "INSERT INTO owned_chat_threads(tenant_id, thread_id, messages_json, updated_at) VALUES (?, ?, ?, ?) "
+                "ON CONFLICT(tenant_id, thread_id) DO UPDATE SET "
+                "messages_json=excluded.messages_json, updated_at=excluded.updated_at",
                 (
-                    str(thread_id or "default"),
+                    self.tenant_id,
+                    thread_id,
                     json.dumps(cleaned, ensure_ascii=True, separators=(",", ":")),
                     datetime.now().isoformat(timespec="seconds"),
                 ),

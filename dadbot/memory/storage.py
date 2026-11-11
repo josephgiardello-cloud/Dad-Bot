@@ -85,6 +85,28 @@ def _only_memory_access_changed(before: dict, after: dict, changed_keys: set[str
     )
 
 
+def _required_projection_revisions(events: list[dict], tenant_id: str) -> dict[str, int]:
+    required: dict[str, int] = {}
+    previous: dict = {}
+    for event in events:
+        if event.get("type") != "TENANT_MEMORY_COMMITTED":
+            continue
+        payload = event.get("payload")
+        if not isinstance(payload, dict) or payload.get("tenant_id") != tenant_id:
+            continue
+        state = payload["state"]
+        changed_keys = {
+            key for key in set(previous) | set(state)
+            if previous.get(key) != state.get(key)
+        }
+        if not _only_memory_access_changed(previous, state, changed_keys):
+            for name, keys in (("graph", _GRAPH_TRACKED_KEYS), ("semantic", _SEMANTIC_TRACKED_KEYS)):
+                if _section_changed(previous, state, keys):
+                    required[name] = payload["revision"]
+        previous = state
+    return required
+
+
 class _MemoryStoreParticipant:
     def __init__(self, backend: MemoryStorageBackend, previous_store: dict) -> None:
         self._backend = backend
@@ -247,7 +269,8 @@ class MemoryStorageBackend:
         ledger = getattr(self.bot, "_execution_ledger", None)
         if ledger is None:
             return latest
-        for event in ledger.read():
+        events = ledger.read()
+        for event in events:
             if event.get("type") != "PROJECTION_STATUS_UPDATED":
                 continue
             payload = event.get("payload")
@@ -258,8 +281,12 @@ class MemoryStorageBackend:
             if projection not in {"graph", "semantic"} or not isinstance(status, dict):
                 continue
             previous = latest.get(projection)
-            if previous is None or int(status.get("generation") or 0) > int(previous.get("generation") or 0):
+            if previous is None or int(status.get("generation") or 0) >= int(previous.get("generation") or 0):
                 latest[projection] = deepcopy(status)
+        for name, revision in _required_projection_revisions(events, tenant_id).items():
+            status = latest.get(name, {"generation": 0, "source_revision": None})
+            if int(status.get("source_revision") or 0) < revision:
+                latest[name] = {**status, "status": "dirty", "required_revision": revision}
         return latest
 
     def _persist_projection_recovery_status(self, projection: str, status: dict) -> None:
@@ -371,28 +398,69 @@ class MemoryStorageBackend:
             raise RuntimeError("Committed tenant memory is unavailable")
         semantic_changed = _section_changed(committed.state, projection, _SEMANTIC_TRACKED_KEYS)
         graph_changed = _section_changed(committed.state, projection, _GRAPH_TRACKED_KEYS)
+        backend = self._local_authority_backend()
+        if backend is None:
+            raise RuntimeError("Local tenant memory commits require file-WAL authority")
         if semantic_changed or graph_changed:
-            raise RuntimeError(
-                "Tenant memory changes requiring semantic or graph repair are not yet supported",
-            )
-
+            self._require_tenant_isolated_indexes()
         try:
-            revision = commit_local_tenant(
-                self._local_authority_backend(),
-                self.bot.config.tenant_id,
-                self._tenant_base_revision,
-                uuid.uuid4().hex,
-                projection,
-                publish or (lambda: None),
-                self._repair_established_snapshot,
-            )
-            self.bot._execution_ledger.load_from_backend()
+            ledger = self.bot._execution_ledger
+            # Keep ordinary event writers behind the raw WAL commit and its head refresh.
+            with ledger._lock:
+                revision = commit_local_tenant(
+                    backend,
+                    self.bot.config.tenant_id,
+                    self._tenant_base_revision,
+                    uuid.uuid4().hex,
+                    projection,
+                    publish or (lambda: None),
+                    self._repair_established_snapshot,
+                )
+                ledger.load_from_backend()
         except TenantMemoryRevisionConflict:
             raise
         except Exception:
             self._tenant_recovery_required = True
             raise
         self._tenant_base_revision = revision
+        if semantic_changed or graph_changed:
+            self._repair_committed_indexes(revision)
+
+    def _require_tenant_isolated_indexes(self) -> None:
+        from dadbot.core.local_tenant_establishment import local_projection_path
+        from dadbot_system.graph_store import SQLiteGraphStore
+        from dadbot_system.semantic_index import SQLiteSemanticIndex
+
+        semantic = self._manager._semantic_manager._semantic_index_backend
+        graph = self._manager.graph_manager._graph_store_backend
+        if not isinstance(semantic, SQLiteSemanticIndex) or not isinstance(graph, SQLiteGraphStore):
+            raise RuntimeError("Indexed local tenant memory writes require tenant-isolated SQLite projections")
+        expected_semantic = local_projection_path(self.bot, self.bot.semantic_memory_db_path)
+        expected_graph = local_projection_path(self.bot, self.bot.graph_store_db_path)
+        if (
+            semantic.db_path.resolve() != Path(expected_semantic).resolve()
+            or graph.db_path.resolve() != Path(expected_graph).resolve()
+        ):
+            raise RuntimeError("Indexed local tenant memory writes require tenant-qualified projection paths")
+
+    def _repair_committed_indexes(self, revision: int) -> None:
+        repaired = False
+        try:
+            self.recover_local_projections()
+            failed = [
+                name for name in ("graph", "semantic")
+                if self._projection_recovery_status.get(name, {}).get("status") != "sync_succeeded"
+                or self._projection_recovery_status.get(name, {}).get("source_revision") != revision
+            ]
+            if failed:
+                raise RuntimeError(
+                    f"Tenant memory committed at revision {revision}; "
+                    f"projection repair requires restart ({', '.join(failed)})",
+                )
+            repaired = True
+        finally:
+            if not repaired:
+                self._tenant_recovery_required = True
 
     def committed_tenant_projection(self) -> dict | None:
         self._authorize_tenant_memory()

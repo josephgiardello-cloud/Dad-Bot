@@ -12,6 +12,7 @@ from dadbot.config import DadBotConfig
 from dadbot.config_schema import ConfigSchema
 from dadbot.context import ContextBuilder
 from dadbot.core.execution_boundary import ModelGatewayScope
+from dadbot.core.execution_ledger import ExecutionLedger
 from dadbot.core.turn_mixin import DadBotTurnMixin
 from dadbot.managers import runtime_client as runtime_client_module
 from dadbot.managers.runtime_client import RuntimeClientManager
@@ -220,7 +221,8 @@ def test_mcp_approval_is_stored_for_the_active_streamlit_thread(monkeypatch):
         _streamlit_active_thread_id="streamlit-thread",
         ACTIVE_MODEL=DEFAULT_MODEL,
         prompt_assembly=SimpleNamespace(build_request_system_prompt=lambda *_args: "Dad persona"),
-        config=SimpleNamespace(active_model=DEFAULT_MODEL),
+        config=SimpleNamespace(active_model=DEFAULT_MODEL, tenant_id="tenant-mcp-test"),
+        _execution_ledger=ExecutionLedger(),
         model_port=SimpleNamespace(generate=lambda *_args, **_kwargs: ""),
     )
     service = MCPApprovalService(bot)

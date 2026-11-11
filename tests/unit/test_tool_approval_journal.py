@@ -1,0 +1,426 @@
+from __future__ import annotations
+
+import asyncio
+import json
+import subprocess
+import sys
+from contextlib import asynccontextmanager
+from dataclasses import replace
+from types import SimpleNamespace
+from unittest.mock import AsyncMock
+
+import pytest
+
+from dadbot.core.execution_ledger import ExecutionLedger
+from dadbot.core.ledger_backend import FileWALLedgerBackend
+from dadbot.core.state_lineage import canonical_state_hash
+from dadbot.core.tool_approval_journal import ApprovedToolCall, ToolApprovalJournal
+
+pytestmark = pytest.mark.unit
+
+
+def _call(**changes):
+    return replace(ApprovedToolCall(
+        session_id="thread-a", trace_id="trace-a", request_id="approval-a", tool_name="light_control",
+        input_hash=canonical_state_hash({"tool_name": "light_control", "arguments": {"entity_id": "light.kitchen"}}),
+    ), **changes)
+
+
+def _execute(journal, call, executor, **changes):
+    return journal.execute(
+        call, tool_name="light_control", arguments={"entity_id": "light.kitchen"}, executor=executor, **changes,
+    )
+
+
+def _ledger(path):
+    ledger = ExecutionLedger()
+    ledger._backend = FileWALLedgerBackend(path)
+    ledger.load_from_backend()
+    return ledger
+
+
+def test_approval_audit_is_scoped_and_does_not_store_arguments():
+    ledger = ExecutionLedger()
+    journal = ToolApprovalJournal(ledger, tenant_id="tenant-a")
+    call = _call()
+    journal.propose(call)
+    event = ledger.read()[-1]
+    assert event["tenant_id"] == "tenant-a"
+    assert event["session_id"] == call.session_id
+    assert event["trace_id"] == call.trace_id
+    assert event["payload"]["input_hash"] == call.input_hash
+    assert "arguments" not in event["payload"]
+    assert event["committed"] is True
+
+
+def test_approved_execution_commits_dispatch_before_effect_and_never_runs_twice():
+    ledger = ExecutionLedger()
+    journal = ToolApprovalJournal(ledger, tenant_id="tenant-a")
+    call = _call()
+    journal.propose(call)
+    journal.decide(call, approved=True)
+
+    async def effect():
+        assert ledger.read()[-1]["payload"]["status"] == "started"
+        return {"is_error": False, "content": "completed"}
+
+    execute = AsyncMock(side_effect=effect)
+    assert asyncio.run(_execute(journal, call, execute))["content"] == "completed"
+    assert journal.status(call) == "succeeded"
+    with pytest.raises(RuntimeError, match="not permitted"):
+        asyncio.run(_execute(journal, call, execute))
+    execute.assert_awaited_once()
+
+
+@pytest.mark.parametrize("approved", [False, True])
+def test_restart_expires_pending_or_approved_proposals(tmp_path, approved):
+    path = tmp_path / "approvals.jsonl"
+    first = ToolApprovalJournal(_ledger(path), tenant_id="tenant-a")
+    call = _call()
+    first.propose(call)
+    if approved:
+        first.decide(call, approved=True)
+    restored = ToolApprovalJournal(_ledger(path), tenant_id="tenant-a")
+    restored.expire_recovered()
+    assert restored.status(call) == "expired"
+    executor = AsyncMock(return_value={})
+    with pytest.raises(RuntimeError, match="not permitted"):
+        asyncio.run(_execute(restored, call, executor))
+    executor.assert_not_called()
+
+
+def test_restart_marks_started_call_uncertain_without_retry(tmp_path):
+    path = tmp_path / "approvals.jsonl"
+    first = ToolApprovalJournal(_ledger(path), tenant_id="tenant-a")
+    call = _call()
+    first.propose(call)
+    first.decide(call, approved=True)
+    first._transition(call, "started", expected={"approved"})
+    restored = ToolApprovalJournal(_ledger(path), tenant_id="tenant-a")
+    restored.expire_recovered()
+    assert restored.status(call) == "uncertain"
+    executor = AsyncMock(return_value={})
+    with pytest.raises(RuntimeError, match="not permitted"):
+        asyncio.run(_execute(restored, call, executor))
+    executor.assert_not_called()
+
+
+@pytest.mark.parametrize("exception", [TimeoutError("remote timeout"), asyncio.CancelledError()])
+def test_failure_or_cancellation_records_uncertainty(exception):
+    journal = ToolApprovalJournal(ExecutionLedger(), tenant_id="tenant-a")
+    call = _call()
+    journal.propose(call)
+    journal.decide(call, approved=True)
+    executor = AsyncMock(side_effect=exception)
+    with pytest.raises(type(exception)):
+        asyncio.run(_execute(journal, call, executor))
+    assert journal.status(call) == "uncertain"
+    with pytest.raises(RuntimeError, match="not permitted"):
+        asyncio.run(_execute(journal, call, executor))
+    executor.assert_awaited_once()
+
+
+def test_denied_or_changed_approval_cannot_execute():
+    journal = ToolApprovalJournal(ExecutionLedger(), tenant_id="tenant-a")
+    call = _call()
+    journal.propose(call)
+    journal.decide(call, approved=False)
+    executor = AsyncMock(return_value={})
+    with pytest.raises(RuntimeError, match="not permitted"):
+        asyncio.run(_execute(journal, call, executor))
+    with pytest.raises(ValueError, match="arguments changed"):
+        asyncio.run(journal.execute(
+            call, tool_name="light_control", arguments={"entity_id": "light.other"}, executor=executor,
+        ))
+    executor.assert_not_called()
+
+
+def test_failed_dispatch_record_blocks_effect(monkeypatch):
+    journal = ToolApprovalJournal(ExecutionLedger(), tenant_id="tenant-a")
+    call = _call()
+    journal.propose(call)
+    journal.decide(call, approved=True)
+
+    def unavailable(*_args, **_kwargs):
+        raise OSError("execution WAL unavailable")
+
+    monkeypatch.setattr(journal.writer, "write_event", unavailable)
+    executor = AsyncMock(return_value={})
+    with pytest.raises(OSError, match="WAL unavailable"):
+        asyncio.run(_execute(journal, call, executor))
+    executor.assert_not_called()
+    assert journal.status(call) == "approved"
+
+
+def test_failed_success_record_keeps_started_outcome_uncertain_on_recovery(monkeypatch):
+    journal = ToolApprovalJournal(ExecutionLedger(), tenant_id="tenant-a")
+    call = _call()
+    journal.propose(call)
+    journal.decide(call, approved=True)
+    write = journal.writer.write_event
+
+    def fail_success(*args, **kwargs):
+        if kwargs["payload"]["status"] == "succeeded":
+            raise OSError("completion WAL unavailable")
+        return write(*args, **kwargs)
+
+    monkeypatch.setattr(journal.writer, "write_event", fail_success)
+    executor = AsyncMock(return_value={})
+    with pytest.raises(OSError, match="completion WAL unavailable"):
+        asyncio.run(_execute(journal, call, executor))
+    assert journal.status(call) == "started"
+    journal.expire_recovered()
+    assert journal.status(call) == "uncertain"
+    executor.assert_awaited_once()
+
+
+def test_approval_identity_is_tenant_and_session_scoped():
+    ledger = ExecutionLedger()
+    first = ToolApprovalJournal(ledger, tenant_id="tenant-a")
+    second = ToolApprovalJournal(ledger, tenant_id="tenant-b")
+    call = _call()
+    other = _call(session_id="thread-b")
+    first.propose(call)
+    first.propose(other)
+    second.propose(call)
+    first.decide(call, approved=True)
+    assert first.status(other) == second.status(call) == "pending"
+    with pytest.raises(ValueError, match="identity"):
+        first.decide(_call(tool_name="other"), approved=True)
+
+
+@pytest.mark.parametrize("field", ["trace_id", "tool_name", "input_hash"])
+def test_approval_status_rejects_changed_identity(field):
+    journal = ToolApprovalJournal(ExecutionLedger(), tenant_id="tenant-a")
+    journal.propose(_call())
+    with pytest.raises(ValueError, match="identity"):
+        journal.status(_call(**{field: "changed"}))
+
+
+def test_failed_recovery_is_not_cached_by_service(monkeypatch):
+    from dadbot.runtime.mcp.approval_service import MCPApprovalService
+
+    bot = SimpleNamespace(config=SimpleNamespace(tenant_id="tenant-a"))
+    service = MCPApprovalService(bot)
+    bot._execution_ledger = ExecutionLedger()
+    recovery = ToolApprovalJournal.expire_recovered
+    attempts = []
+
+    def recover(journal):
+        attempts.append(journal)
+        if len(attempts) == 1:
+            raise OSError("recovery unavailable")
+        recovery(journal)
+
+    monkeypatch.setattr(ToolApprovalJournal, "expire_recovered", recover)
+    with pytest.raises(OSError, match="recovery unavailable"):
+        service._approval_journal()
+    assert service._journal is None
+    assert service._approval_journal() is attempts[1]
+
+
+def test_real_wal_fsync_failure_blocks_dispatch_and_recovery_never_retries(tmp_path, monkeypatch):
+    from dadbot.core import ledger_backend
+
+    path = tmp_path / "approvals.jsonl"
+    journal = ToolApprovalJournal(_ledger(path), tenant_id="tenant-a")
+    call = _call()
+    journal.propose(call)
+    journal.decide(call, approved=True)
+    executor = AsyncMock(return_value={})
+
+    def unavailable(_descriptor):
+        raise OSError("fsync unavailable")
+
+    with monkeypatch.context() as failing:
+        failing.setattr(ledger_backend.os, "fsync", unavailable)
+        with pytest.raises(OSError, match="fsync unavailable"):
+            asyncio.run(_execute(journal, call, executor))
+    executor.assert_not_called()
+    restored = ToolApprovalJournal(_ledger(path), tenant_id="tenant-a")
+    restored.expire_recovered()
+    assert restored.status(call) == "uncertain"
+    with pytest.raises(RuntimeError, match="not permitted"):
+        asyncio.run(_execute(restored, call, executor))
+    executor.assert_not_called()
+
+
+@pytest.mark.parametrize("dispatched", [False, True])
+def test_process_exit_recovers_without_dispatching(tmp_path, dispatched):
+    path = tmp_path / "approvals.jsonl"
+    script = """
+import asyncio, os, sys
+from dadbot.core.execution_ledger import ExecutionLedger
+from dadbot.core.ledger_backend import FileWALLedgerBackend
+from dadbot.core.state_lineage import canonical_state_hash
+from dadbot.core.tool_approval_journal import ApprovedToolCall, ToolApprovalJournal
+ledger = ExecutionLedger()
+ledger._backend = FileWALLedgerBackend(sys.argv[1])
+ledger.load_from_backend()
+journal = ToolApprovalJournal(ledger, tenant_id="tenant-a")
+arguments = {"entity_id": "light.kitchen"}
+call = ApprovedToolCall("thread-a", "trace-a", "approval-a", "light_control",
+    canonical_state_hash({"tool_name": "light_control", "arguments": arguments}))
+journal.propose(call)
+if sys.argv[2] == "True":
+    journal.decide(call, approved=True)
+    async def effect():
+        os._exit(29)
+    asyncio.run(journal.execute(call, tool_name="light_control", arguments=arguments, executor=effect))
+os._exit(29)
+"""
+    child = subprocess.run([sys.executable, "-c", script, str(path), str(dispatched)], check=False, timeout=20)
+    assert child.returncode == 29
+    restored = ToolApprovalJournal(_ledger(path), tenant_id="tenant-a")
+    restored.expire_recovered()
+    assert restored.status(_call()) == ("uncertain" if dispatched else "expired")
+    executor = AsyncMock(return_value={})
+    with pytest.raises(RuntimeError, match="not permitted"):
+        asyncio.run(_execute(restored, _call(), executor))
+    executor.assert_not_called()
+
+
+def test_live_authority_is_rechecked_before_dispatch(monkeypatch):
+    from dadbot.core import tool_approval_journal
+
+    journal = ToolApprovalJournal(ExecutionLedger(), tenant_id="tenant-a")
+    call = _call()
+    journal.propose(call)
+    journal.decide(call, approved=True)
+
+    def revoked():
+        raise PermissionError("authority revoked")
+
+    monkeypatch.setattr(tool_approval_journal, "verify_live_authority", revoked)
+    executor = AsyncMock(return_value={})
+    with pytest.raises(PermissionError, match="revoked"):
+        asyncio.run(_execute(journal, call, executor))
+    assert journal.status(call) == "approved"
+    executor.assert_not_called()
+
+
+def _mcp_service(monkeypatch, *, result=None, follow_up=False):
+    from dadbot.runtime.mcp import approval_service
+    from dadbot.runtime.mcp.tool_client import MCPApprovalRequest, run_mcp_tool_loop
+
+    tools = [{
+        "name": "light_control",
+        "input_schema": {
+            "type": "object", "properties": {"entity_id": {"type": "string"}},
+            "required": ["entity_id"], "additionalProperties": False,
+        },
+    }]
+    plan = json.dumps({
+        "should_continue": True, "action_input": "Review this action", "reasoning": "Explicit request",
+        "tool_calls": [{"name": "light_control", "arguments": {"entity_id": "light.kitchen"}}],
+        "confidence": 1.0,
+    })
+    request = asyncio.run(run_mcp_tool_loop(
+        [{"role": "user", "content": "Turn off light.kitchen"}],
+        tools, model_call=lambda *_args: plan,
+    ))
+    assert isinstance(request, MCPApprovalRequest)
+    ledger = ExecutionLedger()
+    bot = SimpleNamespace(_execution_ledger=ledger, config=SimpleNamespace(tenant_id="tenant-a"))
+    service = approval_service.MCPApprovalService(bot)
+    connections = []
+    actions = []
+
+    class Client:
+        @asynccontextmanager
+        async def connect(self):
+            connections.append(True)
+            yield object()
+
+        async def list_allowed_tools(self, _session, allowed_names):
+            return [tool for tool in tools if tool["name"] in allowed_names]
+
+        async def call_tool(self, _session, name, arguments):
+            assert ledger.read()[-1]["payload"]["status"] == "started"
+            actions.append((name, arguments))
+            if isinstance(result, Exception):
+                raise result
+            return result if result is not None else {"is_error": False, "content": "completed"}
+
+    monkeypatch.setenv("DADBOT_HA_MCP_URL", "http://127.0.0.1:9999/mcp")
+    monkeypatch.setenv("DADBOT_HA_MCP_ALLOWED_TOOLS", "light_control")
+    monkeypatch.setattr(approval_service, "MCPToolClient", lambda *_args, **_kwargs: Client())
+    summary = json.dumps({
+        "should_continue": False, "action_input": "The approved action completed.",
+        "reasoning": "Confirmed result", "tool_calls": [], "confidence": 1.0,
+    })
+    model_outputs = iter([plan, summary] if follow_up else [summary])
+    monkeypatch.setattr(service, "_model_call", lambda *_args, **_kwargs: next(model_outputs))
+    service._queue_approval(request, [], "http://127.0.0.1:9999/mcp", thread_id="thread-a", trace_id="trace-a")
+    return service, ledger, request, actions, connections
+
+
+def test_mcp_approved_call_uses_durable_journal_and_is_not_repeated(monkeypatch):
+    service, ledger, _request, actions, _connections = _mcp_service(monkeypatch)
+    assert "completed" in asyncio.run(service.resolve_mcp_approval("thread-a", approved=True))
+    assert [event["payload"]["status"] for event in ledger.read()] == [
+        "pending", "approved", "started", "succeeded",
+    ]
+    assert all(event["session_id"] == "thread-a" and event["tenant_id"] == "tenant-a" for event in ledger.read())
+    assert "No additional action" in asyncio.run(service.resolve_mcp_approval("thread-a", approved=True))
+    assert len(actions) == 1
+
+
+def test_mcp_rejection_is_audited_without_connecting(monkeypatch):
+    service, ledger, _request, actions, connections = _mcp_service(monkeypatch)
+    assert "not approved" in asyncio.run(service.resolve_mcp_approval("thread-a", approved=False))
+    assert ledger.read()[-1]["payload"]["status"] == "rejected"
+    assert not actions and not connections
+
+
+def test_mcp_restart_expires_proposal_without_restoring_action(monkeypatch):
+    from dadbot.runtime.mcp.approval_service import MCPApprovalService
+
+    service, ledger, _request, actions, connections = _mcp_service(monkeypatch)
+    restored = MCPApprovalService(service.bot)
+    assert restored.get_pending_mcp_approval("thread-a") is None
+    assert ledger.read()[-1]["payload"]["status"] == "expired"
+    asyncio.run(restored.resolve_mcp_approval("thread-a", approved=True))
+    assert not actions and not connections
+
+
+def test_mcp_uncertain_outcome_is_audited_and_not_retried(monkeypatch):
+    service, ledger, _request, actions, _connections = _mcp_service(monkeypatch, result=TimeoutError("remote timeout"))
+    reply = asyncio.run(service.resolve_mcp_approval("thread-a", approved=True))
+    assert "uncertain" in reply
+    assert ledger.read()[-1]["payload"]["status"] == "uncertain"
+    asyncio.run(service.resolve_mcp_approval("thread-a", approved=True))
+    assert len(actions) == 1
+
+
+def test_mcp_follow_up_requires_a_separate_recorded_approval(monkeypatch):
+    service, ledger, _request, actions, _connections = _mcp_service(monkeypatch, follow_up=True)
+    assert "Another" in asyncio.run(service.resolve_mcp_approval("thread-a", approved=True))
+    follow_up = service.get_pending_mcp_approval("thread-a")
+    assert follow_up is not None
+    assert ledger.read()[-1]["payload"]["status"] == "pending"
+    assert "completed" in asyncio.run(service.resolve_mcp_approval("thread-a", approved=True))
+    assert len(actions) == 2
+    assert len({event["payload"]["request_id"] for event in ledger.read()}) == 2
+
+
+def test_mcp_withdrawn_allowlist_expires_approval_without_dispatch(monkeypatch):
+    service, ledger, _request, actions, _connections = _mcp_service(monkeypatch)
+    monkeypatch.setenv("DADBOT_HA_MCP_ALLOWED_TOOLS", "")
+    assert "no longer available" in asyncio.run(service.resolve_mcp_approval("thread-a", approved=True))
+    assert ledger.read()[-1]["payload"]["status"] == "expired"
+    assert not actions
+
+
+def test_mcp_approval_audit_failure_blocks_dispatch_and_retains_proposal(monkeypatch):
+    service, ledger, request, actions, connections = _mcp_service(monkeypatch)
+
+    def unavailable(*_args, **_kwargs):
+        raise OSError("approval journal unavailable")
+
+    monkeypatch.setattr(service._approval_journal().writer, "write_event", unavailable)
+    with pytest.raises(OSError, match="journal unavailable"):
+        asyncio.run(service.resolve_mcp_approval("thread-a", approved=True))
+    assert service.get_pending_mcp_approval("thread-a") is request
+    assert ledger.read()[-1]["payload"]["status"] == "pending"
+    assert not actions and not connections

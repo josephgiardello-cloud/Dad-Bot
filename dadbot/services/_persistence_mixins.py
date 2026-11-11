@@ -231,6 +231,7 @@ class _LedgerOpsMixin:
             write_event = getattr(ledger_writer, "write_event", None)
             session_id = str(
                 (getattr(turn_context, "metadata", {}) or {}).get("control_plane", {}).get("session_id")
+                or (getattr(turn_context, "metadata", {}) or {}).get("session_id")
                 or "default",
             )
 
@@ -351,6 +352,7 @@ class _LedgerOpsMixin:
             if callable(write_event):
                 session_id = str(
                     (getattr(turn_context, "metadata", {}) or {}).get("control_plane", {}).get("session_id")
+                    or (getattr(turn_context, "metadata", {}) or {}).get("session_id")
                     or "default",
                 )
                 write_event(
@@ -924,7 +926,11 @@ class _IntegrityVerifyMixin:
 
         metadata = getattr(turn_context, "metadata", None)
         control_plane = dict(metadata.get("control_plane") or {}) if isinstance(metadata, dict) else {}
-        session_id = str(control_plane.get("session_id") or "default")
+        session_id = str(
+            control_plane.get("session_id")
+            or (metadata.get("session_id") if isinstance(metadata, dict) else "")
+            or "default"
+        )
         trace_id = str(getattr(turn_context, "trace_id", "") or "")
         temporal = getattr(turn_context, "temporal", None)
         occurred_at = str(getattr(temporal, "wall_time", "") or "")

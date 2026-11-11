@@ -3,9 +3,10 @@ from __future__ import annotations
 import hashlib
 import json
 from collections.abc import Awaitable, Callable
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from enum import StrEnum
 from typing import Any, Protocol
+from uuid import uuid4
 
 from pydantic import BaseModel, ConfigDict, Field  # pyright: ignore[reportMissingImports]
 
@@ -181,6 +182,8 @@ def live_turn_request(
     metadata: dict[str, Any] | None = None,
 ) -> TurnRequest:
     resolved_context = context or SovereignContext()
+    if not str(resolved_context.request_id or "").strip():
+        resolved_context = replace(resolved_context, request_id=uuid4().hex)
     return TurnRequest(
         input=UserInput(text=str(text or ""), attachments=list(attachments or [])),
         mode=ExecutionMode.LIVE,

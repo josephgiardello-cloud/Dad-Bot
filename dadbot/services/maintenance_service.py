@@ -32,23 +32,21 @@ class MaintenanceService:
         self.long_term = long_term
 
     def tick(self, turn_context: Any) -> dict[str, Any]:
-        # Proactive engagement: fire any due reminders or life-pattern check-ins.
-        # run_scheduled_proactive_jobs queues messages via bot.queue_proactive_message
-        # and optionally sends OS notifications.  Errors are non-fatal.
-        # NOTE: durable synthesis (archive, consolidate, evolve, forget) is post-commit
-        # only — it runs via SaveNode → schedule_post_turn_maintenance → background task.
-        # It must NOT run inline in the execution path (HealthNode hot path).
-        try:
-            self.maintenance.run_scheduled_proactive_jobs()
-        except Exception as exc:
-            logger.debug(
-                "MaintenanceService.tick: proactive jobs failed (non-fatal): %s",
-                exc,
-            )
-        return {
+        result: dict[str, Any] = {
+            "status": "ok",
             "ran": False,
             "archived": False,
             "consolidated_count": 0,
             "pattern_count": 0,
             "persona_evolved": False,
         }
+        try:
+            result["proactive"] = self.maintenance.run_scheduled_proactive_jobs()
+        except Exception as exc:
+            logger.warning(
+                "MaintenanceService.tick: proactive jobs failed (non-fatal): %s",
+                exc,
+                exc_info=True,
+            )
+            result.update(status="degraded", error=str(exc))
+        return result

@@ -4,6 +4,9 @@ import logging
 import os
 from typing import Any
 
+from dadbot.core.execution_ledger import ExecutionLedger
+from dadbot.core.state_lineage import canonical_state_hash
+from dadbot.core.tool_approval_journal import ApprovedToolCall, ToolApprovalJournal
 from dadbot.services._tool_pipeline_mixin import needs_tool_planning
 from dadbot.runtime.mcp.tool_client import (
     MCPApprovalRequest,
@@ -22,7 +25,43 @@ class MCPApprovalService:
 
     def __init__(self, bot: Any) -> None:
         self.bot = bot
-        self._pending: dict[str, tuple[MCPApprovalRequest, list[dict[str, Any]], str]] = {}
+        self._pending: dict[str, tuple[MCPApprovalRequest, list[dict[str, Any]], str, ApprovedToolCall]] = {}
+        self._journal: ToolApprovalJournal | None = None
+        if isinstance(getattr(bot, "_execution_ledger", None), ExecutionLedger):
+            self._approval_journal()
+
+    def _approval_journal(self) -> ToolApprovalJournal:
+        if self._journal is None:
+            ledger = getattr(self.bot, "_execution_ledger", None)
+            if not isinstance(ledger, ExecutionLedger):
+                raise RuntimeError("MCP approvals require the canonical execution ledger")
+            journal = ToolApprovalJournal(ledger, tenant_id=self.bot.config.tenant_id)
+            journal.expire_recovered()
+            self._journal = journal
+        return self._journal
+
+    def _queue_approval(
+        self,
+        request: MCPApprovalRequest,
+        attachments: list[dict[str, Any]],
+        mcp_url: str,
+        *,
+        thread_id: str,
+        trace_id: str,
+    ) -> None:
+        call = ApprovedToolCall(
+            session_id=thread_id,
+            trace_id=trace_id,
+            request_id=request.request_id,
+            tool_name=request.tool_name,
+            input_hash=canonical_state_hash({"tool_name": request.tool_name, "arguments": request.arguments}),
+        )
+        journal = self._approval_journal()
+        previous = self._pending.get(thread_id)
+        if previous is not None:
+            journal.expire(previous[3])
+        journal.propose(call)
+        self._pending[thread_id] = (request, attachments, mcp_url, call)
 
     @property
     def is_enabled(self) -> bool:
@@ -177,12 +216,18 @@ class MCPApprovalService:
             ),
         )
         if isinstance(result, MCPApprovalRequest):
+            metadata = getattr(context, "metadata", {}) or {}
             thread_id = str(
-                getattr(self.bot, "_streamlit_active_thread_id", None)
+                metadata.get("control_plane", {}).get("session_id")
+                or metadata.get("session_id")
+                or getattr(self.bot, "_streamlit_active_thread_id", None)
                 or getattr(self.bot, "active_thread_id", "default")
                 or "default"
             )
-            self._pending[thread_id] = (result, attachments, mcp_url)
+            self._queue_approval(
+                result, attachments, mcp_url,
+                thread_id=thread_id, trace_id=str(getattr(context, "trace_id", "") or result.request_id),
+            )
             reply = "A Home Assistant action is ready for your review. It will not run until you approve it."
         else:
             reply = str(result or "").strip()
@@ -192,14 +237,18 @@ class MCPApprovalService:
 
     async def resolve_mcp_approval(self, thread_id: str, *, approved: bool) -> str:
         key = str(thread_id or "default")
-        pending = self._pending.pop(key, None)
+        pending = self._pending.get(key)
         if pending is None:
-            return "This Home Assistant approval is no longer pending. No action was sent."
+            return "This Home Assistant approval is no longer pending. No additional action was sent."
 
-        request, _attachments, original_url = pending
+        request, _attachments, original_url, call = pending
+        journal = self._approval_journal()
+        journal.decide(call, approved=approved)
+        del self._pending[key]
         current_url = configured_ha_mcp_url()
         if approved and current_url != original_url:
             request.consumed = True
+            journal.expire(call)
             return "Home Assistant configuration changed, so the proposed action expired. No action was sent."
 
         client = MCPToolClient(
@@ -216,8 +265,18 @@ class MCPApprovalService:
                 purpose="mcp_tool_plan",
                 response_format=schema,
             ),
+            tool_call=lambda session, name, arguments: journal.execute(
+                call,
+                tool_name=name,
+                arguments=arguments,
+                executor=lambda: client.call_tool(session, name, arguments),
+            ),
         )
+        if journal.status(call) == "approved":
+            journal.expire(call)
         if isinstance(result, MCPApprovalRequest):
-            self._pending[key] = (result, _attachments, original_url)
+            self._queue_approval(
+                result, _attachments, original_url, thread_id=key, trace_id=call.trace_id,
+            )
             return "Another Home Assistant action needs your approval before it can run."
         return str(result or "")

@@ -34,6 +34,56 @@ def test_mutation_survives_restart(make_test_dadbot, monkeypatch, tmp_path):
     assert json.loads(memory.read_text(encoding="utf-8"))["last_mood"] == "stale-mirror"
 
 
+def test_local_commit_keeps_shared_execution_ledger_head_atomic(make_test_dadbot, monkeypatch):
+    from dadbot.core import local_tenant_establishment
+
+    monkeypatch.setenv("DADBOT_DURABLE_EXECUTION_LEDGER", "1")
+    bot = make_test_dadbot()
+    ledger = bot._execution_ledger
+    committed = Event()
+    release = Event()
+    attempted = Event()
+    finished = Event()
+    original = local_tenant_establishment.commit_local_tenant
+
+    def pause_after_wal_commit(*args, **kwargs):
+        revision = original(*args, **kwargs)
+        committed.set()
+        assert release.wait(10)
+        return revision
+
+    def write_audit():
+        attempted.set()
+        try:
+            return ledger.write({
+                "type": "UI_RECONNECT_AUDIT", "tenant_id": bot.config.tenant_id,
+                "session_id": "audit", "trace_id": "atomic-head-test", "payload": {},
+                "kernel_step_id": "audit.test", "timestamp": 1.0,
+            })
+        finally:
+            finished.set()
+
+    monkeypatch.setattr(local_tenant_establishment, "commit_local_tenant", pause_after_wal_commit)
+    with ThreadPoolExecutor(max_workers=2) as executor:
+        mutation = executor.submit(bot.mutate_memory_store, last_mood="positive")
+        try:
+            assert committed.wait(10)
+            audit = executor.submit(write_audit)
+            assert attempted.wait(10)
+            if finished.wait(0.2):
+                audit.result(timeout=10)
+                pytest.fail("Audit append observed an unpublished in-memory WAL head")
+        finally:
+            release.set()
+        mutation.result(timeout=10)
+        assert audit.result(timeout=10)["type"] == "UI_RECONNECT_AUDIT"
+    ledger.load_from_backend()
+    state = ledger.replay_tenant_memory(bot.config.tenant_id).state
+    assert isinstance(state, dict)
+    assert state["last_mood"] == "positive"
+    assert sum(event["type"] == "UI_RECONNECT_AUDIT" for event in ledger.read()) == 1
+
+
 def test_startup_rebuilds_stale_graph_from_ledger(make_test_dadbot, monkeypatch, tmp_path):
     monkeypatch.setenv("DADBOT_DURABLE_EXECUTION_LEDGER", "1")
     sessions = tmp_path / "sessions"
@@ -173,17 +223,168 @@ def test_clear_mood_only_tenant_commits_and_survives_restart(make_test_dadbot, m
     assert second._execution_ledger.replay_tenant_memory(second.config.tenant_id).revision == 3
 
 
-def test_memory_addition_fails_closed_until_indexes_are_fenced(make_test_dadbot, monkeypatch):
+def test_indexed_memory_addition_commits_and_repairs_current_revision(make_test_dadbot, monkeypatch):
     monkeypatch.setenv("DADBOT_DURABLE_EXECUTION_LEDGER", "1")
     bot = make_test_dadbot()
-    before = bot.MEMORY_STORE
-    with pytest.raises(RuntimeError, match="semantic or graph repair"):
-        bot.mutate_memory_store(memories=[{"id": "test", "summary": "example"}])
-    assert bot.MEMORY_STORE == before
+    bot.mutate_memory_store(memories=[{"id": "test", "summary": "example"}])
+    committed = bot._execution_ledger.replay_tenant_memory(bot.config.tenant_id)
+    assert committed.revision == 2
+    assert committed.state == bot.MEMORY_STORE
+    assert bot.memory_manager._semantic_manager._semantic_index_backend.existing_content_hashes()
+    status = bot.memory_manager._storage._load_projection_recovery_status()
+    assert all(item["status"] == "sync_succeeded" for item in status.values())
+    assert all(item["source_revision"] == 2 for item in status.values())
+
+
+def test_indexed_updates_and_staged_save_remove_obsolete_semantic_rows(make_test_dadbot, monkeypatch):
+    import hashlib
+
+    monkeypatch.setenv("DADBOT_DURABLE_EXECUTION_LEDGER", "1")
+    bot = make_test_dadbot()
+    semantic = bot.memory_manager._semantic_manager
+    bot.mutate_memory_store(memories=[{"id": "test", "summary": "first example"}], save=False)
+    assert bot._execution_ledger.replay_tenant_memory(bot.config.tenant_id).revision == 1
+    bot.save_memory_store()
+    bot.mutate_memory_store(memories=[{"id": "test", "summary": "updated example"}])
+    catalog = bot.MEMORY_STORE["memories"]
+    expected = {
+        semantic.semantic_memory_key(memory): hashlib.sha256(
+            semantic.memory_embedding_text(memory).encode("utf-8")
+        ).hexdigest()
+        for memory in catalog
+    }
+    assert semantic._semantic_index_backend.existing_content_hashes() == expected
+    bot.mutate_memory_store(memories=[])
+    assert semantic._semantic_index_backend.existing_content_hashes() == {}
+    assert bot._execution_ledger.replay_tenant_memory(bot.config.tenant_id).revision == 4
+
+
+def test_tenants_do_not_share_configured_sqlite_projection_files(make_test_dadbot, monkeypatch, tmp_path):
+    from dadbot.core.local_tenant_establishment import local_projection_path
+
+    monkeypatch.setenv("DADBOT_DURABLE_EXECUTION_LEDGER", "1")
+    paths = {
+        "session_log_dir": tmp_path / "sessions",
+        "semantic_memory_db_path": tmp_path / "semantic.sqlite3",
+        "graph_store_db_path": tmp_path / "graph.sqlite3",
+    }
+    first = make_test_dadbot(tenant_id="tenant-a", **paths)
+    second = make_test_dadbot(tenant_id="tenant-b", **paths)
+    first.mutate_memory_store(memories=[{"id": "shared", "summary": "first tenant example"}])
+    second.mutate_memory_store(memories=[{"id": "shared", "summary": "second tenant example"}])
+    second_index = second.memory_manager._semantic_manager._semantic_index_backend
+    expected = second_index.existing_content_hashes()
+    assert expected
+    assert local_projection_path(first, paths["semantic_memory_db_path"]) != local_projection_path(
+        second, paths["semantic_memory_db_path"],
+    )
+    assert local_projection_path(first, paths["graph_store_db_path"]) != local_projection_path(
+        second, paths["graph_store_db_path"],
+    )
+    first.clear_memory_store()
+    assert second_index.existing_content_hashes() == expected
+    assert second._execution_ledger.replay_tenant_memory("tenant-b").revision == 2
+
+
+def test_unowned_legacy_indexes_are_preserved_and_rebuilt_from_ledger(make_test_dadbot, monkeypatch, tmp_path):
+    from pathlib import Path
+
+    from dadbot.core.local_tenant_establishment import local_projection_path
+
+    monkeypatch.setenv("DADBOT_DURABLE_EXECUTION_LEDGER", "1")
+    semantic = tmp_path / "semantic.sqlite3"
+    graph = tmp_path / "graph.sqlite3"
+    semantic.write_bytes(b"unowned legacy semantic data")
+    graph.write_bytes(b"unowned legacy graph data")
+    bot = make_test_dadbot(semantic_memory_db_path=semantic, graph_store_db_path=graph)
+    bot.mutate_memory_store(memories=[{"id": "test", "summary": "example"}])
+    assert semantic.read_bytes() == b"unowned legacy semantic data"
+    assert graph.read_bytes() == b"unowned legacy graph data"
+    assert Path(local_projection_path(bot, semantic)).exists()
+    assert Path(local_projection_path(bot, graph)).exists()
+
+
+def test_unsupported_index_backend_is_rejected_before_tenant_commit(make_test_dadbot, monkeypatch):
+    monkeypatch.setenv("DADBOT_DURABLE_EXECUTION_LEDGER", "1")
+    bot = make_test_dadbot()
+    with monkeypatch.context() as backend_patch:
+        backend_patch.setattr(bot.memory_manager._semantic_manager, "_semantic_index_backend", object())
+        with pytest.raises(RuntimeError, match="tenant-isolated SQLite"):
+            bot.mutate_memory_store(memories=[{"id": "test", "summary": "example"}])
+    assert not bot.MEMORY_STORE["memories"]
     assert bot._execution_ledger.replay_tenant_memory(bot.config.tenant_id).revision == 1
 
 
-def test_clear_with_indexed_memories_does_not_append_without_fenced_repairs(
+@pytest.mark.parametrize("projection", ["graph", "semantic"])
+def test_unqualified_injected_sqlite_index_is_rejected_before_commit(
+    make_test_dadbot, monkeypatch, tmp_path, projection,
+):
+    monkeypatch.setenv("DADBOT_DURABLE_EXECUTION_LEDGER", "1")
+    bot = make_test_dadbot()
+    backend = (
+        bot.memory_manager._semantic_manager._semantic_index_backend
+        if projection == "semantic" else bot.memory_manager.graph_manager._graph_store_backend
+    )
+    with monkeypatch.context() as backend_patch:
+        backend_patch.setattr(backend, "db_path", tmp_path / "unowned.sqlite3")
+        with pytest.raises(RuntimeError, match="tenant-qualified"):
+            bot.mutate_memory_store(memories=[{"id": "test", "summary": "example"}])
+    assert not bot.MEMORY_STORE["memories"]
+    assert bot._execution_ledger.replay_tenant_memory(bot.config.tenant_id).revision == 1
+
+
+@pytest.mark.parametrize("point", ["snapshot", "graph", "semantic"])
+def test_indexed_mutation_process_termination_repairs_committed_revision(tmp_path, point):
+    env = _environment(tmp_path)
+    env["DADBOT_GRAPH_ENABLE_LLM_EXTRACTION"] = "0"
+    setup = r"""
+import os
+from pathlib import Path
+from dadbot.core.dadbot import DadBot
+from dadbot.memory.semantic_manager import SemanticIndexManager
+from dadbot.services.vector_memory import build_sovereign_memory
+SemanticIndexManager.embed_texts = lambda self, texts, purpose=None: [[1.0] * 12 for _ in texts]
+root = Path(os.environ["DADBOT_MEMORY_PATH"]).parent
+bot = DadBot(service_overrides={"sovereign_memory": build_sovereign_memory(root / "vector-store")})
+"""
+    interrupted_code = setup + r"""
+import sys
+def terminate(*_args, **_kwargs):
+    os._exit(73)
+point = sys.argv[1]
+if point == "snapshot":
+    bot.memory_manager._storage._repair_established_snapshot = terminate
+elif point == "graph":
+    bot.memory_manager.graph_manager._graph_store_backend.replace_graph = terminate
+else:
+    bot.memory_manager._semantic_manager._semantic_index_backend.apply_changes = terminate
+bot.mutate_memory_store(memories=[{"id": "test", "summary": "durable example"}])
+"""
+    interrupted = subprocess.run(
+        [sys.executable, "-c", interrupted_code, point], env=env, timeout=60, check=False,
+        capture_output=True, text=True,
+    )
+    assert interrupted.returncode == 73, interrupted.stderr
+    verify = setup + r"""
+committed = bot._execution_ledger.replay_tenant_memory(bot.config.tenant_id)
+assert committed.revision == 2
+assert bot.MEMORY_STORE == committed.state
+expected = bot.memory_manager.normalize_memory_store({"memories": [{"id": "test", "summary": "durable example"}]})
+assert bot.MEMORY_STORE["memories"][0]["summary"] == expected["memories"][0]["summary"]
+assert bot.memory_manager._semantic_manager._semantic_index_backend.existing_content_hashes()
+status = bot.memory_manager._storage._load_projection_recovery_status()
+assert all(item["status"] == "sync_succeeded" for item in status.values()), status
+assert all(item["source_revision"] == 2 for item in status.values()), status
+bot.shutdown()
+"""
+    resumed = subprocess.run(
+        [sys.executable, "-c", verify], env=env, timeout=60, check=False,
+        capture_output=True, text=True,
+    )
+    assert resumed.returncode == 0, resumed.stderr
+
+
+def test_clear_with_indexed_memories_commits_and_clears_derived_indexes(
     make_test_dadbot, monkeypatch, tmp_path,
 ):
     monkeypatch.setenv("DADBOT_DURABLE_EXECUTION_LEDGER", "1")
@@ -194,12 +395,53 @@ def test_clear_with_indexed_memories_does_not_append_without_fenced_repairs(
         {"memories": [{"summary": "Example memory"}]},
     )
     bot = make_test_dadbot(memory_path=memory, tenant_id=tenant_id, document_store=document_store)
-    before = bot._execution_ledger.replay_tenant_memory(bot.config.tenant_id)
-    with pytest.raises(RuntimeError, match="semantic or graph repair"):
-        bot.clear_memory_store()
+    bot.clear_memory_store()
     after = bot._execution_ledger.replay_tenant_memory(bot.config.tenant_id)
-    assert after.revision == before.revision == 1
-    assert after.state == before.state == bot.MEMORY_STORE
+    assert after.revision == 2
+    assert after.state == bot.MEMORY_STORE
+    assert not after.state["memories"]
+    assert not bot.memory_manager._semantic_manager._semantic_index_backend.existing_content_hashes()
+    assert not bot.memory_manager.graph_manager._graph_store_backend.fetch_graph()["nodes"]
+
+
+@pytest.mark.parametrize("failed_projection", ["graph", "semantic"])
+def test_index_repair_failure_preserves_commit_and_recovers_after_restart(
+    make_test_dadbot, monkeypatch, tmp_path, failed_projection,
+):
+    monkeypatch.setenv("DADBOT_DURABLE_EXECUTION_LEDGER", "1")
+    paths = {
+        "session_log_dir": tmp_path / "sessions",
+        "memory_path": tmp_path / "memory.json",
+        "semantic_memory_db_path": tmp_path / "semantic.sqlite3",
+        "graph_store_db_path": tmp_path / "graph.sqlite3",
+    }
+    bot = make_test_dadbot(**paths)
+    with monkeypatch.context() as repair_patch:
+        def fail(*_args, **_kwargs):
+            raise OSError(f"{failed_projection} repair unavailable")
+
+        if failed_projection == "graph":
+            repair_patch.setattr(bot.memory_manager.graph_manager, "sync_graph_store", fail)
+        else:
+            repair_patch.setattr(bot.memory_manager, "sync_semantic_memory_index", fail)
+        with pytest.raises(RuntimeError, match=r"committed.*revision 2.*repair"):
+            bot.mutate_memory_store(memories=[{"id": "test", "summary": "example"}])
+        committed = bot._execution_ledger.replay_tenant_memory(bot.config.tenant_id)
+        assert committed.revision == 2
+        assert committed.state == bot.MEMORY_STORE
+        status = bot.memory_manager._storage._load_projection_recovery_status()
+        assert status[failed_projection]["status"] == "degraded"
+        assert status[failed_projection]["source_revision"] == 2
+        other = "semantic" if failed_projection == "graph" else "graph"
+        assert status[other]["status"] == "sync_succeeded"
+        with pytest.raises(RuntimeError, match="restart"):
+            bot.mutate_memory_store(last_mood="positive")
+    bot.shutdown()
+    recovered = make_test_dadbot(**paths)
+    assert recovered.MEMORY_STORE == committed.state
+    assert recovered._execution_ledger.replay_tenant_memory(recovered.config.tenant_id).revision == 2
+    status = recovered.memory_manager._storage._load_projection_recovery_status()
+    assert all(item["status"] == "sync_succeeded" for item in status.values())
 
 
 def test_direct_graph_clear_rejects_established_tenant(make_test_dadbot, monkeypatch):
@@ -259,6 +501,66 @@ def test_stale_local_graph_read_fails_closed(make_test_dadbot, monkeypatch, tmp_
             first.memory_manager.graph_manager.graph_snapshot()
     finally:
         first.MEMORY_STORE = second.MEMORY_STORE
+
+
+@pytest.mark.parametrize("changes", [
+    {"last_mood": "positive"},
+    {"consolidated_memories": [{"summary": "Uncommitted graph fact", "category": "general"}]},
+])
+def test_local_graph_read_uses_committed_memory_without_discarding_staged_turn_changes(
+    make_test_dadbot, monkeypatch, changes,
+):
+    from dadbot.core.execution_context import close_core_state_scope, open_core_state_scope
+
+    monkeypatch.setenv("DADBOT_DURABLE_EXECUTION_LEDGER", "1")
+    bot = make_test_dadbot()
+    graph = bot.memory_manager.graph_manager
+    expected = graph.graph_snapshot()
+    committed = bot._execution_ledger.replay_tenant_memory(bot.config.tenant_id)
+    token = open_core_state_scope(bot.memory_manager.memory_core_state())
+    try:
+        staged = bot.mutate_memory_store(save=False, **changes)
+        assert staged != committed.state
+        assert graph.graph_snapshot() == expected
+        assert bot.memory_manager.memory_projection() == staged
+        assert bot._execution_ledger.replay_tenant_memory(bot.config.tenant_id).state == committed.state
+    finally:
+        close_core_state_scope(token)
+
+
+def test_local_graph_refresh_indexes_committed_state_without_publishing_staged_changes(
+    make_test_dadbot, monkeypatch,
+):
+    from dadbot.core.execution_context import close_core_state_scope, open_core_state_scope
+
+    monkeypatch.setenv("DADBOT_DURABLE_EXECUTION_LEDGER", "1")
+    bot = make_test_dadbot()
+    graph = bot.memory_manager.graph_manager
+    expected = graph.graph_snapshot()
+    committed = bot._execution_ledger.replay_tenant_memory(bot.config.tenant_id)
+    token = open_core_state_scope(bot.memory_manager.memory_core_state())
+    try:
+        staged = bot.mutate_memory_store(
+            save=False,
+            consolidated_memories=[{"summary": "Uncommitted graph fact", "category": "general"}],
+        )
+        assert graph.sync_graph_store() == expected
+        assert bot.memory_manager.memory_projection() == staged
+        assert bot._execution_ledger.replay_tenant_memory(bot.config.tenant_id).state == committed.state
+        persisted = graph._graph_store_backend.fetch_graph()
+        assert persisted["nodes"] == expected["nodes"]
+        assert persisted["edges"] == expected["edges"]
+    finally:
+        close_core_state_scope(token)
+
+
+def test_runtime_graph_refresh_does_not_report_revision_degradation(make_test_dadbot, monkeypatch):
+    monkeypatch.setenv("DADBOT_DURABLE_EXECUTION_LEDGER", "1")
+    bot = make_test_dadbot()
+    graph = bot.refresh_memory_graph(force=True)
+    assert isinstance(graph, dict)
+    assert bot._memory_graph_dirty is False
+    assert not any(issue["purpose"] == "memory graph refresh" for issue in bot.recent_runtime_issues())
 
 
 def test_semantic_index_rejects_stale_catalog_and_clear(make_test_dadbot, monkeypatch, tmp_path):
@@ -433,8 +735,8 @@ def test_graph_rebuild_rechecks_revision_before_replacement(make_test_dadbot, mo
     replacement = []
     build = graph_views.build_graph_projection
 
-    def blocked_build(manager, turn_context=None):
-        snapshot = build(manager, turn_context=turn_context)
+    def blocked_build(manager, turn_context=None, **kwargs):
+        snapshot = build(manager, turn_context=turn_context, **kwargs)
         ready.set()
         if not release.wait(10):
             raise TimeoutError("graph rebuild was not released")

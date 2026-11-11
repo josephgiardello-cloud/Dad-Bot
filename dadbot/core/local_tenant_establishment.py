@@ -21,6 +21,15 @@ from dadbot.core.tenant_memory_ledger import (
 )
 
 
+def local_projection_path(bot: Any, path: str | Path) -> str | Path:
+    ledger = getattr(bot, "_execution_ledger", None)
+    if not isinstance(getattr(ledger, "_backend", None), FileWALLedgerBackend) or str(path) == ":memory:":
+        return path
+    tenant_hash = hashlib.sha256(bot.config.tenant_id.encode("utf-8")).hexdigest()
+    configured = Path(path)
+    return configured.with_name(f"{configured.stem}.tenant-{tenant_hash}{configured.suffix}")
+
+
 def _write_evidence(path: Path, payload: dict[str, Any]) -> None:
     temporary = path.with_name(path.name + ".tmp")
     with temporary.open("w", encoding="utf-8") as handle:
