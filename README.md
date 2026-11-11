@@ -792,6 +792,19 @@ they actually consume; reconciliation reads copy only reconciliation events.
 Default full/tail reads still return complete, isolated deep copies, and
 trace roots, completion results and ambiguity checks remain ledger-derived.
 
+Trusted-local plain/CRC WAL appends also reuse a verified sealed prefix only
+after hashing **every existing byte under the writer lock**. The cached
+fingerprint binds those verified bytes plus the exact encoded append, not a
+possibly altered post-write file. New seals and sequences are always checked;
+tenant mutations still validate the entire tenant revision/operation history.
+Byte changes, delegated execution and custom backend subclasses retain full
+historical validation. Each required flush/fsync completes before caching the
+new prefix; a failed append discards it and keeps explicit recovery mandatory.
+Full recovery still verifies every historical event, but restores already
+verified seals without hashing them a second time. Legacy and replay-filtered
+records retain their existing normalization/resealing behavior. These changes
+reduce durable write overhead without batching away commit boundaries.
+
 This local-first indexed-write path requires SQLite projections. Set
 `DADBOT_MEMORY_INDEX_BACKEND=sqlite` to select them without changing PostgreSQL
 snapshot persistence; unset or `auto` preserves the existing backend selection.

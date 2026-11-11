@@ -101,10 +101,11 @@ def _chain_hash(prev_chain_hash: str, event_sha256: str) -> str:
     ).hexdigest()
 
 
-def _verify_persisted_chain(events: list[dict[str, Any]]) -> list[str]:
+def _verify_persisted_chain(
+    events: list[dict[str, Any]], *, previous_chain_hash: str = "", chain_started: bool = False,
+) -> list[str]:
     violations: list[str] = []
-    prev_chain = ""
-    chain_started = False
+    prev_chain = previous_chain_hash
     for idx, event in enumerate(list(events or [])):
         has_chain_fields = any(
             key in event for key in ("event_sha256", "prev_chain_hash", "chain_hash")
@@ -581,7 +582,7 @@ class ExecutionLedger:
             filtered = list(replay_filter(list(filtered)))
         return filtered
 
-    def _rehydrate_loaded_events(self, events: list[dict[str, Any]]) -> None:
+    def _rehydrate_loaded_events(self, events: list[dict[str, Any]], *, preserve_seals: bool = False) -> None:
         self._events = deepcopy(events)
         self._session_heads.clear()
         self._session_indices.clear()
@@ -589,11 +590,12 @@ class ExecutionLedger:
         for event in self._events:
             if not str(event.get("event_id") or ""):
                 event["event_id"] = _deterministic_event_id(event)
-            event_sha256 = _event_sha256(event)
-            event["event_sha256"] = event_sha256
-            event["prev_chain_hash"] = prev_chain
-            prev_chain = _chain_hash(prev_chain, event_sha256)
-            event["chain_hash"] = prev_chain
+            if not preserve_seals:
+                event_sha256 = _event_sha256(event)
+                event["event_sha256"] = event_sha256
+                event["prev_chain_hash"] = prev_chain
+                prev_chain = _chain_hash(prev_chain, event_sha256)
+                event["chain_hash"] = prev_chain
             session_id = str(event.get("session_id") or "")
             tenant_id = str(event.get("tenant_id") or "")
             identity = (tenant_id, session_id)
@@ -647,7 +649,14 @@ class ExecutionLedger:
             if tenant_events != [event for event in events if event.get("type") == "TENANT_MEMORY_COMMITTED"]:
                 raise RuntimeError("Replay filters cannot modify tenant memory events")
             replay_all_tenant_memory(events)
-            self._rehydrate_loaded_events(events)
+            self._rehydrate_loaded_events(
+                events,
+                preserve_seals=not self._replay_filters and all(
+                    event.get("event_id") and event.get("chain_hash")
+                    and event.get("event_sha256") and "prev_chain_hash" in event
+                    for event in events
+                ),
+            )
             self._rebuild_cache()
             self.validate_cache()
             self._backend_content_digest = digest

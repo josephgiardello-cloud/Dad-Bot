@@ -16,6 +16,7 @@ from dadbot.core.ledger_backend import (
     EventualConsistencyBackend,
     FileWALLedgerBackend,
     InMemoryLedgerBackend,
+    LedgerHeadConflict,
     WALCorruptionError,
 )
 from dadbot.core.ledger_index import LedgerIndex
@@ -30,6 +31,174 @@ def _session_event(value):
         "timestamp": "2026-01-01",
         "payload": {"state": {"value": value}},
     }
+
+
+@pytest.mark.parametrize("backend_type", [FileWALLedgerBackend, CRCFileWALLedgerBackend])
+def test_unchanged_append_verifies_only_new_event_after_verified_prefix(tmp_path, monkeypatch, backend_type):
+    from dadbot.core import execution_ledger
+
+    backend = backend_type(tmp_path / "ledger")
+    ledger = ExecutionLedger(backend)
+    ledger.write(_session_event(0))
+    verified_lengths = []
+    verify = execution_ledger._verify_persisted_chain
+    loads = []
+    load = backend._load_unlocked
+
+    def capture_verify(events, **kwargs):
+        verified_lengths.append(len(events))
+        return verify(events, **kwargs)
+
+    def capture_load():
+        loads.append(True)
+        return load()
+
+    monkeypatch.setattr(execution_ledger, "_verify_persisted_chain", capture_verify)
+    monkeypatch.setattr(backend, "_load_unlocked", capture_load)
+    for value in range(1, 12):
+        ledger.write(_session_event(value))
+    assert verified_lengths == [1] * 11
+    assert not loads
+    assert ledger.verify_replay(mode="chain")["ok"]
+    assert ExecutionLedger(backend_type(tmp_path / "ledger")).load_from_backend() == 12
+
+
+@pytest.mark.parametrize("backend_type", [FileWALLedgerBackend, CRCFileWALLedgerBackend])
+def test_append_prefix_detects_same_size_tampering_and_external_writer(tmp_path, backend_type):
+    import os
+
+    path = tmp_path / "ledger"
+    ledger = ExecutionLedger(backend_type(path))
+    ledger.write(_session_event(1))
+    original = path.read_bytes()
+    stat = path.stat()
+    changed = original.replace(b'"value": 1', b'"value": 9')
+    assert changed != original and len(changed) == len(original)
+    path.write_bytes(changed)
+    os.utime(path, ns=(stat.st_atime_ns, stat.st_mtime_ns))
+    with pytest.raises((WALCorruptionError, LedgerHeadConflict)):
+        ledger.write(_session_event(2))
+    assert path.read_bytes() == changed
+    path.write_bytes(original)
+    ledger.load_from_backend()
+    other = ExecutionLedger(backend_type(path))
+    other.load_from_backend()
+    other.write(_session_event(2))
+    with pytest.raises(LedgerHeadConflict):
+        ledger.write(_session_event(3))
+    ledger.load_from_backend()
+    ledger.write(_session_event(3))
+    assert ledger.verify_replay(mode="chain")["ok"]
+    assert len(ledger.read()) == 3
+
+
+@pytest.mark.parametrize("backend_type", [FileWALLedgerBackend, CRCFileWALLedgerBackend])
+def test_append_prefix_failure_keeps_fsync_ambiguity_and_requires_full_recovery(tmp_path, monkeypatch, backend_type):
+    from dadbot.core import ledger_backend
+
+    path = tmp_path / "ledger"
+    backend = backend_type(path)
+    ledger = ExecutionLedger(backend)
+    ledger.write(_session_event(1))
+    original_fsync = ledger_backend.os.fsync
+
+    def fail_fsync(*args):
+        raise OSError("synthetic durable append failure")
+
+    monkeypatch.setattr(ledger_backend.os, "fsync", fail_fsync)
+    with pytest.raises(OSError, match="durable append"):
+        ledger.write(_session_event(2))
+    with pytest.raises(RuntimeError, match="reload"):
+        ledger.read()
+    monkeypatch.setattr(ledger_backend.os, "fsync", original_fsync)
+    assert ledger.load_from_backend() == 2
+    ledger.write(_session_event(3))
+    assert ExecutionLedger(backend_type(path)).load_from_backend() == 3
+
+
+@pytest.mark.parametrize("backend_type", [FileWALLedgerBackend, CRCFileWALLedgerBackend])
+def test_append_prefix_digest_binds_expected_bytes_not_post_write_tampering(tmp_path, monkeypatch, backend_type):
+    from dadbot.core import ledger_backend
+
+    path = tmp_path / "ledger"
+    ledger = ExecutionLedger(backend_type(path))
+    ledger.write(_session_event(1))
+    fsync = ledger_backend.os.fsync
+
+    def tamper_after_fsync(fd):
+        fsync(fd)
+        raw = path.read_bytes()
+        changed = raw.replace(b'"value": 1', b'"value": 9')
+        assert changed != raw
+        path.write_bytes(changed)
+
+    monkeypatch.setattr(ledger_backend.os, "fsync", tamper_after_fsync)
+    ledger.write(_session_event(2))
+    monkeypatch.setattr(ledger_backend.os, "fsync", fsync)
+    corrupted = path.read_bytes()
+    with pytest.raises((WALCorruptionError, LedgerHeadConflict)):
+        ledger.write(_session_event(3))
+    assert path.read_bytes() == corrupted
+
+
+@pytest.mark.parametrize("backend_type", [FileWALLedgerBackend, CRCFileWALLedgerBackend])
+def test_custom_append_backends_do_not_skip_their_loaders(tmp_path, monkeypatch, backend_type):
+    class CustomBackend(backend_type):
+        pass
+
+    backend = CustomBackend(tmp_path / "ledger")
+    ledger = ExecutionLedger(backend)
+    loads = []
+    load = backend._load_unlocked
+
+    def capture_load():
+        loads.append(True)
+        return load()
+
+    monkeypatch.setattr(backend, "_load_unlocked", capture_load)
+    ledger.write(_session_event(1))
+    ledger.write(_session_event(2))
+    assert len(loads) == 2
+
+
+@pytest.mark.parametrize("backend_type", [FileWALLedgerBackend, CRCFileWALLedgerBackend])
+def test_full_reload_verifies_sealed_history_once_and_preserves_isolated_lineage(tmp_path, monkeypatch, backend_type):
+    from dadbot.core import execution_ledger
+
+    path = tmp_path / "ledger"
+    writer = ExecutionLedger(backend_type(path))
+    for value in range(8):
+        writer.write(_session_event(value))
+    hashes = []
+    hash_event = execution_ledger._event_sha256
+
+    def capture_hash(event):
+        hashes.append(event["event_id"])
+        return hash_event(event)
+
+    monkeypatch.setattr(execution_ledger, "_event_sha256", capture_hash)
+    restored = ExecutionLedger(backend_type(path))
+    assert restored.load_from_backend() == 8
+    assert len(hashes) == 8
+    assert restored.read() == writer.read()
+    copied = restored.read()
+    copied[0]["payload"]["state"]["value"] = 99
+    assert restored.read() == writer.read()
+    restored.write(_session_event(8))
+    assert restored.read()[-1]["parent_event_id"] == writer.read()[-1]["event_id"]
+    assert restored.verify_replay(mode="chain")["ok"]
+
+
+def test_filtered_reload_still_reseals_its_derived_chain(tmp_path):
+    path = tmp_path / "ledger"
+    writer = ExecutionLedger(FileWALLedgerBackend(path))
+    for value in range(4):
+        writer.write(_session_event(value))
+    restored = ExecutionLedger(FileWALLedgerBackend(path))
+    restored.add_replay_filter(lambda events: events[1:])
+    assert restored.load_from_backend() == 3
+    assert restored.read()[0]["prev_chain_hash"] == ""
+    assert restored.verify_replay(mode="chain")["ok"]
 
 
 def test_ledger_events_are_isolated_from_caller_mutation():

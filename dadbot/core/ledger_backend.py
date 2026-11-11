@@ -18,6 +18,7 @@ import json
 import os
 import threading
 from abc import ABC, abstractmethod
+from collections.abc import Callable
 from contextlib import nullcontext
 from copy import deepcopy
 from pathlib import Path
@@ -56,7 +57,9 @@ def _require_complete_wal_tail(path: Path) -> None:
                 raise WALCorruptionError(f"Incomplete WAL tail in {path}; recovery is required before appending")
 
 
-def _validate_append_head(persisted: list[dict[str, Any]], event: dict[str, Any]) -> None:
+def _validate_append_head(
+    persisted: list[dict[str, Any]], event: dict[str, Any], *, verified_prefix: bool = False,
+) -> None:
     from dadbot.core.execution_ledger import _verify_persisted_chain
     from dadbot.core.tenant_memory_ledger import validate_tenant_event_seal
 
@@ -67,8 +70,15 @@ def _validate_append_head(persisted: list[dict[str, Any]], event: dict[str, Any]
                 "Unchained events cannot be appended to a chained execution ledger",
             )
         return
-    violations = _verify_persisted_chain([*persisted, event])
-    sequence_report = SequenceValidator.validate([*persisted, event])
+    if verified_prefix and persisted and persisted[-1].get("chain_hash"):
+        violations = _verify_persisted_chain(
+            [event], previous_chain_hash=persisted[-1]["chain_hash"], chain_started=True,
+        )
+        sequence_tail = next((record for record in reversed(persisted) if record.get("sequence") is not None), None)
+        sequence_report = SequenceValidator.validate([sequence_tail, event] if sequence_tail is not None else [event])
+    else:
+        violations = _verify_persisted_chain([*persisted, event])
+        sequence_report = SequenceValidator.validate([*persisted, event])
     if violations or not sequence_report["ok"]:
         raise LedgerHeadConflict(
             "Execution ledger head changed or is invalid; reload and verify before retrying",
@@ -77,6 +87,34 @@ def _validate_append_head(persisted: list[dict[str, Any]], event: dict[str, Any]
         from dadbot.core.tenant_memory_ledger import replay_all_tenant_memory
 
         replay_all_tenant_memory([*persisted, event])
+
+
+class _WALAppendVerifier:
+    """Reuse a sealed prefix only after checking all current bytes under the writer lock."""
+
+    def __init__(self) -> None:
+        self._snapshot: tuple[bytes, list[dict[str, Any]]] | None = None
+
+    def validate(
+        self, path: Path, load: Callable[[], list[dict[str, Any]]], event: dict[str, Any], *, reuse: bool,
+    ) -> tuple[list[dict[str, Any]], bytes]:
+        snapshot = self._snapshot
+        self._snapshot = None
+        prefix_bytes = path.read_bytes()
+        digest = hashlib.sha256(prefix_bytes).digest()
+        unchanged = reuse and snapshot is not None and snapshot[0] == digest
+        events = snapshot[1] if unchanged and snapshot is not None else load()
+        _validate_append_head(events, event, verified_prefix=unchanged)
+        return events, prefix_bytes
+
+    def record(
+        self, prefix_bytes: bytes, line: str, events: list[dict[str, Any]], event: dict[str, Any], *, reuse: bool,
+    ) -> None:
+        if reuse and event.get("chain_hash"):
+            events.append(deepcopy(event))
+            digest = hashlib.sha256(prefix_bytes)
+            digest.update(line.encode("utf-8"))
+            self._snapshot = (digest.digest(), events)
 
 
 def _coerce_event_record(event: dict[str, Any] | SovereignEvent) -> dict[str, Any]:
@@ -200,6 +238,7 @@ class FileWALLedgerBackend(LedgerBackend):
         self._known_binding: dict[str, Any] | None = None
         self._fsync_enabled = bool(fsync)
         self._lock = threading.RLock()
+        self._append_verifier = _WALAppendVerifier()
         self._path.parent.mkdir(parents=True, exist_ok=True)
         from dadbot.core.durability import FileLockMutex
         from dadbot_system.delegation import tenant_mutation_fence
@@ -339,21 +378,27 @@ class FileWALLedgerBackend(LedgerBackend):
         with fence:
             if "wal_binding" in serialized:
                 raise WALCorruptionError("WAL binding cannot be appended as an event")
-            self._authorize_event(serialized)
             line = json.dumps(serialized, default=str) + "\n"
+            serialized = json.loads(line)
+            self._authorize_event(serialized)
             should_fsync = self._fsync_enabled and (
                 committed or str(serialized.get("type") or "") in self.COMMITTED_TYPES
             )
             from dadbot.core.durability import FileLockMutex
 
             with self._lock, FileLockMutex(self._path.with_name(self._path.name + ".lock")).locked():
+                self._read_binding()
                 _require_complete_wal_tail(self._path)
-                _validate_append_head(self._load_unlocked(), serialized)
-                with open(self._path, "a", encoding="utf-8") as handle:
+                reuse = authority is None and type(self) is FileWALLedgerBackend
+                events, prefix_bytes = self._append_verifier.validate(
+                    self._path, self._load_unlocked, serialized, reuse=reuse,
+                )
+                with open(self._path, "a", encoding="utf-8", newline="") as handle:
                     handle.write(line)
                     handle.flush()
                     if should_fsync:
                         os.fsync(handle.fileno())
+                self._append_verifier.record(prefix_bytes, line, events, serialized, reuse=reuse)
 
     @staticmethod
     def _authorize_event(event: dict[str, Any]) -> None:
@@ -455,6 +500,7 @@ class CRCFileWALLedgerBackend(LedgerBackend):
         self._path = Path(path)
         self._fsync_enabled = bool(fsync)
         self._lock = threading.RLock()
+        self._append_verifier = _WALAppendVerifier()
         self._path.parent.mkdir(parents=True, exist_ok=True)
         if not self._path.exists():
             self._path.touch()
@@ -462,7 +508,7 @@ class CRCFileWALLedgerBackend(LedgerBackend):
     def append(self, event: dict[str, Any] | SovereignEvent, *, committed: bool = False) -> None:
         from dadbot.core.durability import CRC32LineCodec
 
-        serialized = _coerce_event_record(event)
+        serialized = json.loads(json.dumps(_coerce_event_record(event), default=str))
         line = CRC32LineCodec.encode(serialized)
         should_fsync = self._fsync_enabled and (
             committed or str(serialized.get("type") or "") in self.COMMITTED_TYPES
@@ -471,12 +517,18 @@ class CRCFileWALLedgerBackend(LedgerBackend):
 
         with self._lock, FileLockMutex(self._path.with_name(self._path.name + ".lock")).locked():
             _require_complete_wal_tail(self._path)
-            _validate_append_head(self._load_unlocked(), serialized)
-            with open(self._path, "a", encoding="utf-8") as handle:
+            from dadbot_system.delegation import _execution_authority
+
+            reuse = _execution_authority.get() is None and type(self) is CRCFileWALLedgerBackend
+            events, prefix_bytes = self._append_verifier.validate(
+                self._path, self._load_unlocked, serialized, reuse=reuse,
+            )
+            with open(self._path, "a", encoding="utf-8", newline="") as handle:
                 handle.write(line)
                 handle.flush()
                 if should_fsync:
                     os.fsync(handle.fileno())
+            self._append_verifier.record(prefix_bytes, line, events, serialized, reuse=reuse)
 
     def load(self) -> list[dict[str, Any]]:
         from dadbot.core.durability import FileLockMutex
