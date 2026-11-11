@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import logging
 import os
+from copy import deepcopy
 from typing import Any
 
 from dadbot.core.execution_ledger import ExecutionLedger
@@ -255,6 +256,14 @@ class MCPApprovalService:
             current_url or original_url,
             bearer_token=str(os.environ.get("DADBOT_HA_MCP_TOKEN") or ""),
         )
+
+        async def execute_approved(session: Any, name: str, arguments: dict[str, Any]) -> dict[str, Any]:
+            frozen_arguments = deepcopy(arguments)
+            return await journal.execute(
+                call, tool_name=name, arguments=frozen_arguments,
+                executor=lambda: client.call_tool(session, name, deepcopy(frozen_arguments)),
+            )
+
         result = await resume_mcp_with_fallback(
             request,
             client,
@@ -265,12 +274,7 @@ class MCPApprovalService:
                 purpose="mcp_tool_plan",
                 response_format=schema,
             ),
-            tool_call=lambda session, name, arguments: journal.execute(
-                call,
-                tool_name=name,
-                arguments=arguments,
-                executor=lambda: client.call_tool(session, name, arguments),
-            ),
+            tool_call=execute_approved,
         )
         if journal.status(call) == "approved":
             journal.expire(call)

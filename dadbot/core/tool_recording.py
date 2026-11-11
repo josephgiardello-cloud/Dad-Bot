@@ -41,7 +41,8 @@ class ToolIORecord:
         input_payload: Raw parameters passed to tool
         output_payload: Actual tool output (return value)
         output_hash: Stable hash of output_payload
-        status: "ok" | "error" | "partial" | "replayed" | "degraded"
+        status: "succeeded" | "cached" | "failed" | "uncertain" | "replayed";
+            legacy records may also use "ok", "partial", or "degraded"
         latency_ms: Wall-clock latency of the execution
         error: Error message if status == "error", else ""
         metadata: Optional additional context (permissions, retry count, etc.)
@@ -64,7 +65,7 @@ class ToolIORecord:
 
     def is_success(self) -> bool:
         """True if execution succeeded (status ok/partial/cached/replayed)."""
-        return self.status in {"ok", "partial", "cached", "replayed"}
+        return self.status in {"succeeded", "ok", "partial", "cached", "replayed"}
 
     def matches_request(self, tool_name: str, input_hash: str) -> bool:
         """True if this record matches a given tool request."""
