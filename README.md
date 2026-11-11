@@ -821,6 +821,10 @@ and use ledger events, never the mutable registry; changed external heads fail
 the existing append checks. Tenant/session isolation, session deletion and
 `JOB_COMPLETED` result projection are preserved. Custom, filtered, unverified,
 non-fsynced and authenticated/delegated ledgers keep complete patches.
+Verified append fingerprints compare the complete appended JSON record,
+including its seals, rather than Python container equality. Tuple results and
+other existing JSON-normalized values therefore retain the verified fingerprint
+without changing the original event values returned to runtime callers.
 
 Trusted-local plain/CRC WAL appends also reuse a verified sealed prefix only
 after hashing **every existing byte under the writer lock**. The cached

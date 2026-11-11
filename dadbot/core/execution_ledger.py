@@ -358,7 +358,11 @@ class ExecutionLedger:
             return None
         with backend._lock:
             snapshot = backend._append_verifier._snapshot
-            if snapshot is not None and len(snapshot[1]) == len(self._events) + 1 and snapshot[1][-1] == payload:
+            if (
+                snapshot is not None and len(snapshot[1]) == len(self._events) + 1
+                and json.dumps(snapshot[1][-1], sort_keys=True, default=str)
+                == json.dumps(payload, sort_keys=True, default=str)
+            ):
                 # Reuse an already bound runtime prefix, or establish exact record equality.
                 if (
                     (previous_digest is not None and snapshot[2] == previous_digest)

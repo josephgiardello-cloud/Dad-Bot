@@ -34,6 +34,23 @@ def _session_event(value):
     }
 
 
+@pytest.mark.parametrize("backend_type", [FileWALLedgerBackend, CRCFileWALLedgerBackend])
+def test_json_normalized_append_keeps_verified_digest_and_original_runtime_types(tmp_path, backend_type):
+    path = tmp_path / "ledger"
+    ledger = ExecutionLedger(backend_type(path))
+    first = ledger.write(_session_event({"tuple": (1, 2), "bytes": b"value"}))
+    assert first["payload"]["state"]["value"] == {"tuple": (1, 2), "bytes": b"value"}
+    assert ledger._backend_content_digest == hashlib.sha256(path.read_bytes()).digest()
+    second = ledger.write(_session_event(2))
+    assert ledger._backend_content_digest == hashlib.sha256(path.read_bytes()).digest()
+    assert second["parent_event_id"] == first["event_id"]
+    restored = ExecutionLedger(backend_type(path))
+    restored.load_from_backend()
+    assert restored.read()[0]["payload"]["state"]["value"] == {"tuple": [1, 2], "bytes": "b'value'"}
+    assert ledger.replay_hash() == restored.replay_hash()
+    assert ledger.read()[0]["payload"]["state"]["value"]["tuple"] == (1, 2)
+
+
 def test_digest_records_hash_complete_payloads_and_return_only_isolated_scalars(monkeypatch):
     import hashlib
 
@@ -164,14 +181,19 @@ def test_append_refresh_reuses_verified_runtime_prefix_without_historical_compar
 
 
 @pytest.mark.parametrize("backend_type", [FileWALLedgerBackend, CRCFileWALLedgerBackend])
-def test_append_refresh_preserves_roundtrip_normalization_of_the_new_event(tmp_path, backend_type):
-    ledger = ExecutionLedger(backend_type(tmp_path / "ledger"))
+def test_append_refresh_keeps_runtime_type_and_fresh_restore_normalizes(tmp_path, backend_type):
+    path = tmp_path / "ledger"
+    ledger = ExecutionLedger(backend_type(path))
     ledger.write(_session_event(1))
     ledger.load_from_backend(only_if_changed=True)
     ledger.write(_session_event((2, 3)))
-    assert ledger._backend_content_digest is None
+    assert ledger._backend_content_digest == hashlib.sha256(path.read_bytes()).digest()
     ledger.load_from_backend(only_if_changed=True)
-    assert ledger.read()[-1]["payload"]["state"]["value"] == [2, 3]
+    assert ledger.read()[-1]["payload"]["state"]["value"] == (2, 3)
+
+    restored = ExecutionLedger(backend_type(path))
+    restored.load_from_backend()
+    assert restored.read()[-1]["payload"]["state"]["value"] == [2, 3]
 
 
 @pytest.mark.parametrize("backend_type", [FileWALLedgerBackend, CRCFileWALLedgerBackend])

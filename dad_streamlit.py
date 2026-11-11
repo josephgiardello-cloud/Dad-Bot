@@ -941,7 +941,7 @@ def _runtime_pool() -> StreamlitBotPool:
     return StreamlitBotPool()
 
 
-_STREAMLIT_RUNTIME_BUILD = "2026-11-11-session-delta-ui-v34"
+_STREAMLIT_RUNTIME_BUILD = "2026-11-11-json-append-digest-ui-v35"
 
 st.set_page_config(
     page_title="DadBot",
