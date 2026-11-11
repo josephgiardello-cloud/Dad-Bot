@@ -545,6 +545,71 @@ class ExecutionLedger:
             self.validate_cache()
             return [_event_digest_record(event) for event in self._events]
 
+    def session_state_delta(
+        self, *, tenant_id: str, session_id: str, state_patch: dict[str, Any],
+    ) -> dict[str, Any]:
+        """Omit JSON-identical fields already projected from the verified local ledger."""
+        from dadbot.core.tenant_session import resolve_tenant_id
+        from dadbot_system.delegation import _execution_authority
+
+        tenant = resolve_tenant_id(tenant_id)
+        session = str(session_id or "").strip()
+        if not session:
+            raise ValueError("session_id is required")
+        with self._lock:
+            self._ensure_backend_reconciled()
+            self.validate_cache()
+            eligible = (
+                type(self) is ExecutionLedger
+                and isinstance(self._backend, (FileWALLedgerBackend, CRCFileWALLedgerBackend))
+                and type(self._backend) in (FileWALLedgerBackend, CRCFileWALLedgerBackend)
+                and self._backend_content_digest is not None
+                and not any((
+                    self._replay_filters, self._authenticated_authority_required,
+                    _execution_authority.get() is not None,
+                    (
+                        isinstance(self._backend, FileWALLedgerBackend)
+                        and self._backend._security_mode == "AUTHENTICATED"
+                    ),
+                    not self._backend._fsync_enabled,
+                ))
+            )
+            if not eligible:
+                return deepcopy(state_patch)
+            current = self._session_state_fields(tenant, session, frozenset(state_patch))
+            return {
+                key: deepcopy(value) for key, value in state_patch.items()
+                if key not in current or (
+                    json.dumps(value, sort_keys=True, default=str)
+                    != json.dumps(current[key], sort_keys=True, default=str)
+                )
+            }
+
+    def _session_state_fields(
+        self, tenant_id: str, session_id: str, fields: frozenset[str],
+    ) -> dict[str, Any]:
+        current: dict[str, Any] = {}
+        for event in self._events:
+            if (
+                str(event.get("tenant_id") or "").strip() != tenant_id
+                or str(event.get("session_id") or "default").strip() != session_id
+            ):
+                continue
+            payload = dict(event.get("payload") or {})
+            owner = str(payload.get("tenant_id") or "").strip()
+            if owner and owner != tenant_id:
+                raise ValueError("ledger event tenant does not match its payload")
+            event_type = event.get("type")
+            if event_type == "SESSION_STATE_UPDATED":
+                current.update({
+                    key: value for key, value in dict(payload.get("state") or {}).items() if key in fields
+                })
+            elif event_type == "SESSION_STATE_DELETED":
+                current.clear()
+            elif event_type == "JOB_COMPLETED" and "last_result" in fields:
+                current["last_result"] = payload.get("result")
+        return current
+
     def read(
         self, full: bool = True, *,
         event_types: frozenset[str] | None = None, payload_types: frozenset[str] | None = None,

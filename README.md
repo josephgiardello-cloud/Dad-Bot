@@ -812,6 +812,16 @@ is relaxed, and uncertainty still requires explicit ledger recovery.
 Default full/tail reads still return complete, isolated deep copies, and
 trace roots, completion results and ambiguity checks remain ledger-derived.
 
+Verified built-in trusted-local WAL session-state writes omit top-level fields
+whose complete JSON value already matches the committed session projection.
+This uses the existing `SESSION_STATE_UPDATED` patch contract: CoreState event
+history and full runtime state are retained, and even an empty patch still
+commits its event and fsync boundary. Comparison and append hold the ledger lock
+and use ledger events, never the mutable registry; changed external heads fail
+the existing append checks. Tenant/session isolation, session deletion and
+`JOB_COMPLETED` result projection are preserved. Custom, filtered, unverified,
+non-fsynced and authenticated/delegated ledgers keep complete patches.
+
 Trusted-local plain/CRC WAL appends also reuse a verified sealed prefix only
 after hashing **every existing byte under the writer lock**. The cached
 fingerprint binds those verified bytes plus the exact encoded append, not a

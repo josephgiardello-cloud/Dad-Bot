@@ -1994,15 +1994,23 @@ class ExecutionControlPlane(ReconciliationMixin, CompactionMixin):
             persisted_patch = json.loads(json.dumps(dict(state_patch or {}), default=str))
         except (TypeError, ValueError, RecursionError) as exc:
             raise RuntimeError("session state is not serializable for ledger persistence") from exc
-        self.ledger_writer.write_event(
-            event_type="SESSION_STATE_UPDATED",
-            session_id=sid,
-            tenant_id=tenant_id,
-            step_key="control_plane.merge_session_state",
-            trace_token=str(trace_token or ""),
-            payload={"tenant_id": tenant_id, "state": persisted_patch},
-            committed=True,
-        )
+        with self.ledger._lock:
+            if (
+                type(self.ledger) is ExecutionLedger
+                and getattr(self.ledger.session_state_delta, "__func__", None) is ExecutionLedger.session_state_delta
+            ):
+                persisted_patch = self.ledger.session_state_delta(
+                    tenant_id=tenant_id, session_id=sid, state_patch=persisted_patch,
+                )
+            self.ledger_writer.write_event(
+                event_type="SESSION_STATE_UPDATED",
+                session_id=sid,
+                tenant_id=tenant_id,
+                step_key="control_plane.merge_session_state",
+                trace_token=str(trace_token or ""),
+                payload={"tenant_id": tenant_id, "state": persisted_patch},
+                committed=True,
+            )
         patch = dict(state_patch or {})
         session = self.registry.get_or_create(sid, tenant_id=tenant_id)
         existing = session.setdefault("state", {}) if isinstance(session, dict) else {}
