@@ -37,6 +37,7 @@ from tests.scenario_suite import (
     SCENARIOS,
     get_scenarios_by_category,
 )
+from tests.test_phase4a import _stub_llm as _canonical_stub_llm
 
 
 def _classify_phase4_failure(detail: object) -> str:
@@ -164,7 +165,7 @@ class TestPhase1MockExecution:
             assert "planner_output" in trace
             assert "tools_executed" in trace
             assert "memory_accessed" in trace
-            assert "inal_response" in trace
+            assert "final_response" in trace
 
             # Scoring struct
             scoring = result["scoring"]
@@ -177,53 +178,14 @@ class TestPhase1MockExecution:
 @pytest.mark.phase4_harness
 @pytest.mark.integration
 class TestPhase4AOrchestratorIntegration:
-    """Phase 4A: Real orchestrator execution (with graceful skip if unavailable)."""
+    """Compatibility checks using the canonical offline transport."""
 
-    @pytest.fixture(scope="class")
+    @pytest.fixture(scope="function")
     def orchestrator(self, make_test_dadbot):
-        """Fixture: Get pre-initialized orchestrator if available."""
-        try:
-
-            bot = make_test_dadbot()
-            orchestrator = getattr(bot, "turn_orchestrator", None)
-            if orchestrator is None:
-                pytest.skip("Orchestrator unavailable")
-
-            orchestrator._last_turn_context = SimpleNamespace(
-                state={
-                    "plan": {"steps": ["oline"]},
-                    "tool_ir": {"executions": []},
-                    "memory_structured": {},
-                }
-            )
-            oline_response = {"message": {"content": "[phase4a-oline]"}}
-            oline_web = {
-                "heading": "Oline Result",
-                "summary": "Oline benchmark stub result.",
-                "source_url": "",
-                "source_label": "",
-            }
-            with (
-                patch.object(
-                    orchestrator,
-                    "handle_turn",
-                    new=AsyncMock(return_value=("[phase4a-oline]", True)),
-                ),
-                patch.object(bot, "call_ollama_chat", return_value=oline_response),
-                patch.object(bot.runtime_client, "call_llm", return_value=oline_response),
-                patch.object(bot.runtime_client, "call_ollama_chat", return_value=oline_response),
-                patch.object(bot.runtime_client, "call_ollama_chat_with_model", return_value=oline_response),
-                patch.object(bot.agentic_handler, "lookup_web", return_value=oline_web),
-                patch.object(bot, "reresh_session_summary", return_value=""),
-                patch.object(
-                    bot.maintenance_scheduler,
-                    "run_post_turn_maintenance",
-                    return_value={"oline_stub": True},
-                ),
-            ):
-                yield orchestrator
-        except Exception:
-            pytest.skip("Orchestrator unavailable: {e}")
+        bot = make_test_dadbot()
+        orchestrator = bot.turn_orchestrator
+        with _canonical_stub_llm(orchestrator.registry.get("llm")):
+            yield orchestrator
 
     def test_orchestrator_available(self, orchestrator):
         """Phase 4A: Verify orchestrator is available."""

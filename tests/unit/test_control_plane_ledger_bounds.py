@@ -58,7 +58,7 @@ def test_noop_compaction_hashes_all_payloads_without_copying_history(monkeypatch
     before = plane.ledger.read()
     expected_digest = plane._event_stream_digest(before)
     copied_lists = []
-    original_copy = execution_ledger.deepcopy
+    original_copy = execution_ledger._copy_ledger_value
 
     def capture_copy(value):
         if isinstance(value, list):
@@ -66,7 +66,7 @@ def test_noop_compaction_hashes_all_payloads_without_copying_history(monkeypatch
         return original_copy(value)
 
     with monkeypatch.context() as patch:
-        patch.setattr(execution_ledger, "deepcopy", capture_copy)
+        patch.setattr(execution_ledger, "_copy_ledger_value", capture_copy)
         report = plane._maybe_compact_ledger()
     assert not copied_lists, "Disabled built-in compaction must not copy historical payloads"
     assert report["reason"] == "durable_checkpoint_required"
@@ -173,7 +173,7 @@ def test_digest_only_compaction_preserves_full_snapshot_for_other_views(monkeypa
     })
     before = ledger.read()
     copied_lists = []
-    original_copy = execution_ledger.deepcopy
+    original_copy = execution_ledger._copy_ledger_value
 
     def capture_copy(value):
         if isinstance(value, list):
@@ -181,7 +181,7 @@ def test_digest_only_compaction_preserves_full_snapshot_for_other_views(monkeypa
         return original_copy(value)
 
     with monkeypatch.context() as patch:
-        patch.setattr(execution_ledger, "deepcopy", capture_copy)
+        patch.setattr(execution_ledger, "_copy_ledger_value", capture_copy)
         report = plane._maybe_compact_ledger()
     assert copied_lists == [before]
     assert report["lossless_proof"]["pre_digest"] == plane._event_stream_digest(before)
@@ -223,7 +223,7 @@ def test_compaction_snapshot_reuse_requires_unchanged_builtin_head(monkeypatch, 
         return report
 
     monkeypatch.setattr(compactor, "compact", change_head)
-    original_copy = execution_ledger.deepcopy
+    original_copy = execution_ledger._copy_ledger_value
     copied_lists = []
 
     def capture_copy(value):
@@ -232,7 +232,7 @@ def test_compaction_snapshot_reuse_requires_unchanged_builtin_head(monkeypatch, 
         return original_copy(value)
 
     with monkeypatch.context() as patch:
-        patch.setattr(execution_ledger, "deepcopy", capture_copy)
+        patch.setattr(execution_ledger, "_copy_ledger_value", capture_copy)
         if change == "uncertain":
             with pytest.raises(RuntimeError, match="reload"):
                 plane._maybe_compact_ledger()
@@ -266,7 +266,7 @@ def test_job_trace_selection_does_not_copy_other_execution_payloads(monkeypatch)
     before = plane.ledger.read()
     job = SimpleNamespace(trace_id="trace-1", job_id="job-1")
     expected = before[:2]
-    original_copy = execution_ledger.deepcopy
+    original_copy = execution_ledger._copy_ledger_value
     copied_lists = []
 
     def require_selected_copy(value):
@@ -276,7 +276,7 @@ def test_job_trace_selection_does_not_copy_other_execution_payloads(monkeypatch)
         return original_copy(value)
 
     with monkeypatch.context() as patch:
-        patch.setattr(execution_ledger, "deepcopy", require_selected_copy)
+        patch.setattr(execution_ledger, "_copy_ledger_value", require_selected_copy)
         selected = plane._job_trace_events(job)
     assert selected == expected
     assert copied_lists

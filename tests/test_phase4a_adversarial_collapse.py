@@ -119,18 +119,20 @@ class TestPhase4AMemoryMutationRaceSimulation:
             {
                 "sequence": 2,
                 "type": "SESSION_STATE_UPDATED",
+                "tenant_id": "tenant-4a",
                 "session_id": "s-4a",
                 "payload": {"state": {"counter": 2}},
             },
             {
                 "sequence": 1,
                 "type": "SESSION_STATE_UPDATED",
+                "tenant_id": "tenant-4a",
                 "session_id": "s-4a",
                 "payload": {"state": {"counter": 1}},
             },
         ]
         store.rebuild_from_ledger(events)
-        assert store.get("s-4a")["counter"] == 2
+        assert store.get("s-4a", tenant_id="tenant-4a")["counter"] == 2
 
     def test_partial_rollback_scenario_fails_safe(self):
         queue = MutationQueue()

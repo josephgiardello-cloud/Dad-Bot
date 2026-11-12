@@ -256,9 +256,9 @@ class ConversationPersistenceManager:
         if not normalized:
             return None
         ledger = self._execution_ledger()
-        for event in reversed(ledger.read(
-            event_types=frozenset({"GRAPH_CHECKPOINT"}), payload_trace_id=normalized,
-        )):
+        reader = getattr(ledger, "read_checkpoints", None)
+        events = reader(payload_trace_id=normalized) if callable(reader) else ledger.read()
+        for event in reversed(events):
             if str(event.get("type") or "") != "GRAPH_CHECKPOINT":
                 continue
             event_session_id = str(event.get("session_id") or "").strip()
@@ -728,8 +728,10 @@ class ConversationPersistenceManager:
         checkpoint: dict,
         _skip_turn_event: bool = False,
     ) -> None:
+        from dadbot.core.ledger_backend import _copy_ledger_value
+
         self._require_active_trace("persist_graph_checkpoint")
-        payload = copy.deepcopy(dict(checkpoint or {}))
+        payload = _copy_ledger_value(dict(checkpoint or {}))
         if not payload:
             return
         source_session_id = str(payload.get("session_id") or "").strip()
@@ -773,7 +775,7 @@ class ConversationPersistenceManager:
             session_state = snapshot_session_state()
             if not isinstance(session_state, dict):
                 raise TypeError("snapshot_session_state must return a dict")
-            checkpoint_event_payload["session_state"] = copy.deepcopy(session_state)
+            checkpoint_event_payload["session_state"] = _copy_ledger_value(session_state)
         self._append_ledger_event(
             event_type="GRAPH_CHECKPOINT",
             trace_token=trace_id,
@@ -1386,7 +1388,9 @@ class ConversationPersistenceManager:
             if requested_tenant_id:
                 self._require_checkpoint_authority(requested_tenant_id)
             ledger = self._execution_ledger()
-            for event in reversed(ledger.read(event_types=frozenset({"GRAPH_CHECKPOINT"}))):
+            reader = getattr(ledger, "read_checkpoints", None)
+            events = reader(payload_trace_id=normalized_trace_id or None) if callable(reader) else ledger.read()
+            for event in reversed(events):
                 if str(event.get("type") or "") != "GRAPH_CHECKPOINT":
                     continue
                 event_session_id = str(event.get("session_id") or "").strip()

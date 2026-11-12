@@ -58,16 +58,51 @@ product.
   unchanged-history reloads. File-WAL byte verification is unchanged.
   Checkpoint lookups filter payload trace IDs before copying. Turn commit no
   longer reinserts its existing memory into the reducer.
-- Milestone 0 remains open. The 110-turn checkpoint soak still exceeds its
-  unchanged 120-second limit and is excluded from that 281-case selection.
-  Profiling shows growing full-state histories, repeated copies, and compaction
-  hashing. Neither the full baseline nor long-run performance is certified.
+- Focused verification of the lossless-history, collection, and first baseline
+  repair group passes 400 cases, with 8 infrastructure skips and 1 optional
+  slow-test skip. Coverage includes checkpoint IO, tenant isolation, restart
+  recovery, malformed-reference rejection, and custom-reader compatibility.
+  The original 20-turn pruning and
+  8-session/40-turn checks pass in 5.38 and 13.19 seconds.
+- Late-turn profiling identified repeated full writes of the rolling execution
+  timeline after its existing 512-entry limit. Suffix references now preserve
+  those windows without rewriting their retained entries. All three original
+  scale gates pass. The 110-turn soak passed repeatedly under its unchanged
+  120-second deadline; the latest affected-suite run completed it in 66.39 seconds.
+- Unfiltered collection completes. A legacy launcher previously ran nested pytest
+  during import and modified `builtins.DadBot`; it is now an import-safe script
+  entrypoint. Broad authority checks also exposed a stale copy-instrumentation
+  hook and a checkpoint cache masking changed wire payloads. Both are repaired;
+  cached checkpoint views now require a matching complete wire-payload hash.
+- The resumed unfiltered run reached 1,440 passes, 103 skips, and 10 expected
+  failures before stopping on 2 failures and 3 setup errors. The affected group
+  now passes 17 cases: synthetic replay events carry tenant identity, the legacy
+  harness checks the current response key, and its integration fixture uses
+  function scope and the supported offline transport without mocking turns.
+  Milestone 0 remains open pending another unfiltered run.
 - The tagged
   [durable submission authority suite](../tests/unit/test_durable_submission_authority.py)
   passes 29 cases. It covers delegation, revocation, worker execution, and
   publication; it does not certify every memory projection or consolidation path.
 
 No full-suite or production-readiness claim follows from these focused passes.
+
+### Local history format
+
+Session updates and graph-checkpoint payloads can replace cumulative list or
+dictionary prefixes with version-1 append references. Version 2 also supports a
+retained list suffix plus new entries for rolling windows. Each reference
+identifies its field path, full prior length, and SHA-256 base hash; suffix
+offsets are range-checked. Replacements, deletions, version-1 references, and
+legacy full snapshots retain their existing meaning. Earlier windows remain
+in the ledger. Decoders reject missing, corrupt, overlapping, or cross-root
+references and unsupported versions.
+
+Only verified trusted-local native/file/CRC backends produce references.
+Authenticated and custom producers retain full payloads. Session-state checkpoint
+references remain checksum-protected separately from noncanonical checkpoint
+contents. Checkpoint readers materialize complete payloads; those views are not
+sealed events and must not be used as replay input.
 
 ## Non-negotiable contracts
 
