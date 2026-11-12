@@ -60,7 +60,7 @@ def _require_complete_wal_tail(path: Path) -> None:
 def _validate_append_head(
     persisted: list[dict[str, Any]], event: dict[str, Any], *, verified_prefix: bool = False,
 ) -> None:
-    from dadbot.core.execution_ledger import _verify_persisted_chain
+    from dadbot.core.canonical_event import _verify_persisted_chain
     from dadbot.core.tenant_memory_ledger import validate_tenant_event_seal
 
     validate_tenant_event_seal(event)

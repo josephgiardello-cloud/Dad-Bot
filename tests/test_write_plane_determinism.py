@@ -18,6 +18,8 @@ They do not block any write.  Failures indicate hidden non-deterministic
 writers that must be hunted down before Phase 2.3 enforcement.
 """
 
+from unittest.mock import AsyncMock
+
 import pytest
 
 from dadbot.core.write_plane import MutationRecord, reset_write_plane
@@ -125,6 +127,30 @@ class TestTurnStateMutatorInstrumentation:
     def _make_mutator(self):
         from dadbot.services.turn_state_mutator import TurnStateMutator
         return TurnStateMutator(self._make_mock_bot())
+
+    @pytest.mark.parametrize("wall_time", [None, "2030-01-01T12:00:00+00:00"])
+    def test_pipeline_timestamps_follow_injected_clocks(self, wall_time):
+        from datetime import datetime
+        from types import SimpleNamespace
+
+        from dadbot.core.event_clock import reset_event_clock, set_event_clock
+        from dadbot.services.turn_state_mutator import TurnStateMutator
+
+        epoch = 1_700_000_000.0
+        bot = self._make_mock_bot()
+        bot._current_turn_time_base = SimpleNamespace(wall_time=wall_time)
+        expected = wall_time or datetime.fromtimestamp(epoch).isoformat(timespec="seconds")
+        set_event_clock(lambda: epoch)
+        try:
+            mutator = TurnStateMutator(bot)
+            started = mutator.start_turn_pipeline("async", "hello")
+            completed = mutator.complete_turn_pipeline()
+        finally:
+            reset_event_clock()
+
+        assert started["started_at"] == expected
+        assert completed is not None
+        assert completed["completed_at"] == expected
 
     def test_store_turn_pipeline_logs_write(self):
         mut = self._make_mutator()
@@ -344,16 +370,15 @@ def _diff_logs(
     return "\n".join(diff) if diff else "(no textual diff — check ordering or turn_id)"
 
 
-def _build_isolated_bot(tmp_path: _Path):
+def _build_isolated_bot(tmp_path: _Path, make_test_dadbot):
     """Create a DadBot instance with a fully isolated temp directory."""
-    from dadbot.core.dadbot import DadBot
-    bot = DadBot()
-    bot.MEMORY_PATH = tmp_path / "dad_memory.json"
-    bot.SEMANTIC_MEMORY_DB_PATH = tmp_path / "dad_memory_semantic.sqlite3"
-    bot.GRAPH_STORE_DB_PATH = tmp_path / "dad_memory_graph.sqlite3"
-    bot.SESSION_LOG_DIR = tmp_path / "session_logs"
-    bot.MEMORY_STORE = bot.default_memory_store()
-    bot.save_memory_store()
+    bot = make_test_dadbot(
+        tenant_id="test-write-plane",
+        memory_path=tmp_path / "dad_memory.json",
+        semantic_memory_db_path=tmp_path / "dad_memory_semantic.sqlite3",
+        graph_store_db_path=tmp_path / "dad_memory_graph.sqlite3",
+        session_log_dir=tmp_path / "session_logs",
+    )
     # deterministic stub for semantic embedding
     bot.embed_texts = lambda texts, **kw: [
         [0.0] * 12 for _ in ([texts] if isinstance(texts, str) else list(texts))
@@ -367,13 +392,20 @@ def _stub_bot_for_replay(orch, monkeypatch, *, fixed_reply: str) -> None:
     The goal is a fast, repeatable turn whose writes are driven purely by the
     deterministic pipeline logic, not by LLM sampling or wall-clock effects.
     """
-    service = orch.registry.get("agent_service")
-    if service is not None:
-        async def _fixed_agent(context, _rich):
-            return (fixed_reply, False)
-        monkeypatch.setattr(service, "run_agent", _fixed_agent)
-
     bot = orch.bot
+    monkeypatch.setattr(bot.model_port, "generate", lambda *args, **kwargs: fixed_reply)
+    monkeypatch.setattr(bot.model_port, "generate_async", AsyncMock(return_value=fixed_reply))
+
+    from dadbot.core.graph_temporal import VirtualClock
+
+    temporal_node = next(node for node in orch.graph.nodes if node.name == "temporal")
+    execute_temporal = temporal_node.execute
+
+    async def fixed_temporal(registry, context):
+        context.virtual_clock = VirtualClock(base_epoch=1_700_000_000.0, step_size_seconds=0.0)
+        return await execute_temporal(registry, context)
+
+    monkeypatch.setattr(temporal_node, "execute", fixed_temporal)
     # Memory consolidation / forgetting
     mc = getattr(bot, "memory_coordinator", None)
     if mc is not None:
@@ -424,6 +456,7 @@ class TestReplayComparison:
         self,
         bot_dir: _Path,
         monkeypatch,
+        make_test_dadbot,
         *,
         turn_label: str,
     ) -> tuple[object, list]:
@@ -432,7 +465,7 @@ class TestReplayComparison:
         from dadbot.core.write_plane import reset_write_plane
         from dadbot.core.event_clock import set_event_clock, reset_event_clock
 
-        bot = _build_isolated_bot(bot_dir)
+        bot = _build_isolated_bot(bot_dir, make_test_dadbot)
         orch = bot.turn_orchestrator
         _stub_bot_for_replay(orch, monkeypatch, fixed_reply=self.FIXED_REPLY)
 
@@ -458,18 +491,13 @@ class TestReplayComparison:
 
         log = plane.drain_log()
 
-        try:
-            bot.shutdown()
-        except Exception:
-            pass
-
         return result, log
 
-    async def test_write_log_nonempty_and_attributed(self, tmp_path, monkeypatch):
+    async def test_write_log_nonempty_and_attributed(self, tmp_path, monkeypatch, make_test_dadbot):
         """Basic gate: the instrumentation must capture at least one attributed write."""
         bot_dir = tmp_path / "bot_a"
         bot_dir.mkdir()
-        _, log = await self._run_one(bot_dir, monkeypatch, turn_label="t-attr")
+        _, log = await self._run_one(bot_dir, monkeypatch, make_test_dadbot, turn_label="t-attr")
 
         assert len(log) > 0, (
             "Write plane captured zero records for a full turn — "
@@ -481,15 +509,15 @@ class TestReplayComparison:
             f"{[(r.path, r.value_repr[:40]) for r in anonymous]}"
         )
 
-    async def test_two_runs_produce_same_output(self, tmp_path, monkeypatch):
+    async def test_two_runs_produce_same_output(self, tmp_path, monkeypatch, make_test_dadbot):
         """Same input + same state_0 → same output text."""
         dir_a = tmp_path / "bot_a"
         dir_b = tmp_path / "bot_b"
         dir_a.mkdir()
         dir_b.mkdir()
 
-        result_1, _ = await self._run_one(dir_a, monkeypatch, turn_label="t1-output")
-        result_2, _ = await self._run_one(dir_b, monkeypatch, turn_label="t2-output")
+        result_1, _ = await self._run_one(dir_a, monkeypatch, make_test_dadbot, turn_label="t1-output")
+        result_2, _ = await self._run_one(dir_b, monkeypatch, make_test_dadbot, turn_label="t2-output")
 
         # FinalizedTurnResult is (response_text, bool) or similar
         out_1 = result_1[0] if isinstance(result_1, tuple) else str(result_1)
@@ -500,7 +528,7 @@ class TestReplayComparison:
             f"  Run 2: {out_2!r}"
         )
 
-    async def test_two_runs_produce_same_write_paths(self, tmp_path, monkeypatch):
+    async def test_two_runs_produce_same_write_paths(self, tmp_path, monkeypatch, make_test_dadbot):
         """Same input + same state_0 → same write paths (set equality).
 
         This is a weaker form of the full log comparison — it passes even if
@@ -512,8 +540,8 @@ class TestReplayComparison:
         dir_a.mkdir()
         dir_b.mkdir()
 
-        _, log_1 = await self._run_one(dir_a, monkeypatch, turn_label="t1-paths")
-        _, log_2 = await self._run_one(dir_b, monkeypatch, turn_label="t2-paths")
+        _, log_1 = await self._run_one(dir_a, monkeypatch, make_test_dadbot, turn_label="t1-paths")
+        _, log_2 = await self._run_one(dir_b, monkeypatch, make_test_dadbot, turn_label="t2-paths")
 
         paths_1 = [r.path for r in log_1]
         paths_2 = [r.path for r in log_2]
@@ -531,7 +559,7 @@ class TestReplayComparison:
             f"  Run 2 path sequence: {paths_2}"
         )
 
-    async def test_two_runs_produce_identical_log(self, tmp_path, monkeypatch):
+    async def test_two_runs_produce_identical_log(self, tmp_path, monkeypatch, make_test_dadbot):
         """Full replay invariant: (source, path, value_repr) must be identical.
 
         This is the strictest form.  It will FAIL until Phase 2.3 enforces
@@ -542,8 +570,8 @@ class TestReplayComparison:
         dir_a.mkdir()
         dir_b.mkdir()
 
-        _, log_1 = await self._run_one(dir_a, monkeypatch, turn_label="t1-full")
-        _, log_2 = await self._run_one(dir_b, monkeypatch, turn_label="t2-full")
+        _, log_1 = await self._run_one(dir_a, monkeypatch, make_test_dadbot, turn_label="t1-full")
+        _, log_2 = await self._run_one(dir_b, monkeypatch, make_test_dadbot, turn_label="t2-full")
 
         sig_1 = [(r.source, r.path, r.value_repr) for r in log_1]
         sig_2 = [(r.source, r.path, r.value_repr) for r in log_2]

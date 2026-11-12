@@ -695,9 +695,9 @@ class DadBotBootMixin:
                 )
 
     def _run_proactive_heartbeat_tick(self) -> None:
-        from dadbot.ui.streamlit_context import streamlit_turn_lock
+        from dadbot.core.runtime_locks import runtime_turn_lock
 
-        with streamlit_turn_lock(self):
+        with runtime_turn_lock(self):
             self.assistant.run_heartbeat(force=False)
 
     # ------------------------------------------------------------------

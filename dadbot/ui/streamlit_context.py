@@ -10,19 +10,11 @@ from datetime import datetime
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
+from dadbot.core.runtime_locks import runtime_turn_lock as streamlit_turn_lock
+
 if TYPE_CHECKING:
     from dadbot.core.dadbot import DadBot
     from dadbot.services.context_service import ContextService
-
-
-def streamlit_turn_lock(bot: Any) -> Any:
-    # The canonical sync path bridges into a worker that also needs _session_lock.
-    with bot._session_lock:
-        lock = getattr(bot, "_streamlit_turn_lock", None)
-        if lock is None:
-            lock = threading.RLock()
-            bot._streamlit_turn_lock = lock
-        return lock
 
 
 class StreamlitBotPool:

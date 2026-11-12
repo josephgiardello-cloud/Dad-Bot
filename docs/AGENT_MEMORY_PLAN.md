@@ -1,7 +1,7 @@
 # Agent and Memory Hardening Plan
 
 Date: 2026-11-11  
-Status: Approved execution sequence; milestone 0 is in progress.
+Status: Milestone 0 verified for the default local suite; milestone 1 is next.
 
 ## Goal
 
@@ -30,79 +30,29 @@ product.
 
 ### Validation status
 
-- Published foundation: commit `9eef5ae6` on `tenant-identity-remediation`.
-- Published fixture correction: commit `d44a6a82` in
-  [kernel contract enforcement tests](../tests/distribution_readiness/tier1_kernel/test_contract_enforcement.py).
-  The fixture now includes safety/save stages instead of bypassing the required
-  save-stage invariant.
-- Latest fixture-release checks: 57 Tier 1 kernel and durable-submission-authority
-  tests passed.
-- Earlier foundation checks passed: 93 proactivity/authority/Streamlit checks and
-  42 loop/snapshot checks.
-- Broad-suite triage fixed deterministic fault sampling, boundary scanning, and
-  obsolete agent API tests. The next group exposed a shadowed supervisor cache
-  and stale checkpoint, SaveNode, and hybrid-ranking test assumptions.
-- Regression, hybrid, and authority checks now pass 192 cases, with 10 expected
-  failures. Memory-manager checks pass 72 cases, with 13 skips. Short Windows
-  temporary paths avoid failures creating long backup filenames.
-- The latest unfiltered diagnostic stopped after 1,396 passes, 104 skips,
-  10 expected failures, 3 failures, and 7 setup errors. The next repairs address
-  Phase 4A fixture scope, missing mocks, invalid helper names, and benchmark
-  error reporting; the separate-process checkpoint test now executes real turns.
-- The repaired Phase 4A/harness/authority selection passes 81 cases with one
-  pre-existing skip. A separate 8-session/40-turn isolation check also passes.
-- The latest ledger/checkpoint/reducer/authority selection passes 281 cases.
-  The 20-turn pruning check now passes in 11.96 seconds under its original
-  30-second limit; 8-session/40-turn isolation passes in 21.04 seconds.
-  Native in-memory ledgers own their records and use revision tokens to avoid
-  unchanged-history reloads. File-WAL byte verification is unchanged.
-  Checkpoint lookups filter payload trace IDs before copying. Turn commit no
-  longer reinserts its existing memory into the reducer.
-- Published lossless-history, collection, and first baseline repairs
-  (`b7f2f6b2`) passed 400 focused cases, with 8 infrastructure skips and 1 optional
-  slow-test skip. Coverage includes checkpoint IO, tenant isolation, restart
-  recovery, malformed-reference rejection, and custom-reader compatibility.
-  The original 20-turn pruning and
-  8-session/40-turn checks pass in 5.38 and 13.19 seconds.
-- Late-turn profiling identified repeated full writes of the rolling execution
-  timeline after its existing 512-entry limit. Suffix references now preserve
-  those windows without rewriting their retained entries. All three original
-  scale gates pass. The 110-turn soak passed repeatedly under its unchanged
-  120-second deadline; the latest affected-suite run completed it in 66.39 seconds.
-- Unfiltered collection completes. A legacy launcher previously ran nested pytest
-  during import and modified `builtins.DadBot`; it is now an import-safe script
-  entrypoint. Broad authority checks also exposed a stale copy-instrumentation
-  hook and a checkpoint cache masking changed wire payloads. Both are repaired;
-  cached checkpoint views now require a matching complete wire-payload hash.
-- The resumed unfiltered run reached 1,440 passes, 103 skips, and 10 expected
-  failures before stopping on 2 failures and 3 setup errors. The affected group
-  now passes 17 cases: synthetic replay events carry tenant identity, the legacy
-  harness checks the current response key, and its integration fixture uses
-  function scope and the supported offline transport without mocking turns.
-  Milestone 0 remains open pending another unfiltered run.
-- Consolidation mapped all 27 shared legacy cases to equivalent or stronger
-  canonical assertions. Three mock checks already existed as module-level tests;
-  the remaining full-mock, real-turn save, and missing-key checks now live in
-  [the canonical Phase 4A suite](../tests/test_phase4a.py). The redundant copy and
-  its one-off generator are removed. The generator's control-character regex
-  also deleted ASCII `f`, corrupting API names.
-- Consolidation verification covers 50 passing cases and one optional slow-test
-  skip, including a focused recheck of all three migrated tests. The unchanged
-  scale gates passed in 109.10 seconds (110 turns), 20.80 seconds (isolation),
-  and 8.81 seconds (pruning). The repository-wide undefined-name check is clean.
-  Unfiltered baseline certification remains open.
-- The next unfiltered run reached 1,795 passes, 105 skips, and 10 expected failures
-  before stopping on five failures. Their complete repair selection passes
-  52 cases with one optional slow-test skip: tenant-qualified recovery fixtures,
-  current telemetry paths and audit executor results, and projection scans that
-  exclude temporary application copies. The original scale gates passed again
-  in 107.92, 13.82, and 5.33 seconds. Another unfiltered pass is still required.
-- The tagged
-  [durable submission authority suite](../tests/unit/test_durable_submission_authority.py)
-  passes 29 cases. It covers delegation, revocation, worker execution, and
-  publication; it does not certify every memory projection or consolidation path.
+The unfiltered default suite passed on November 12, 2026: **4,659 passed,
+123 skipped, 10 expected failures, zero failures**. Test deadlines and production
+authority checks are unchanged.
 
-No full-suite or production-readiness claim follows from these focused passes.
+The original scale gates in [Phase 4A](../tests/test_phase4a.py) also passed:
+
+| Gate | Time | Limit |
+| --- | --- | --- |
+| 110 canonical turns | 117.64 s | 120 s |
+| Eight sessions, five turns each | 22.00 s | 60 s |
+| 20-turn exact pruning count | 10.00 s | 30 s |
+
+Baseline repairs cover tenant-qualified fixtures, materialized checkpoint views,
+same-request tool replay, deterministic pipeline clocks, selective-copy
+instrumentation, Streamlit/Windows process isolation, and import-cycle removal.
+Canonical hashing and chain verification now share the existing
+[canonical event module](../dadbot/core/canonical_event.py). UI and heartbeat
+dispatch share the same [runtime lock](../dadbot/core/runtime_locks.py).
+
+PostgreSQL, Redis, live-model integrations, optional dependencies, slow/stress
+runs, and explicitly quarantined cases remain unverified where skipped.
+Skips are not passes. This baseline does not certify every memory projection,
+consolidation path, or production deployment.
 
 ### Local history format
 

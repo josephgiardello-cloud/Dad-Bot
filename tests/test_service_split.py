@@ -305,7 +305,7 @@ def test_turn_service_reply_generation_patch_does_not_override_output_authority(
     assert not reply.startswith("generated::")
 
 
-def test_dependency_registry_can_override_runtime_interface(monkeypatch, tmp_path):
+def test_dependency_registry_can_override_runtime_interface(make_test_dadbot):
     class StubRuntimeInterface:
         def chat_loop(self):
             return "stub-chat-loop"
@@ -313,29 +313,16 @@ def test_dependency_registry_can_override_runtime_interface(monkeypatch, tmp_pat
         def chat_loop_via_service(self, service_client, session_id=None):
             return "stub-chat-loop-service"
 
-    monkeypatch.setenv("DADBOT_MEMORY_PATH", str(tmp_path / "memory.json"))
-    monkeypatch.setenv("DADBOT_SEMANTIC_DB_PATH", str(tmp_path / "semantic.sqlite3"))
-    monkeypatch.setenv("DADBOT_GRAPH_DB_PATH", str(tmp_path / "graph.sqlite3"))
-    monkeypatch.setenv("DADBOT_SESSION_LOG_DIR", str(tmp_path / "session_logs"))
-
     stub_runtime_interface = StubRuntimeInterface()
     dependency_registry = {"runtime_interface": stub_runtime_interface}
 
-    injected_bot = DadBot(dependency_registry=dependency_registry)
-    try:
-        assert injected_bot.runtime_interface is stub_runtime_interface
-        assert injected_bot.chat_loop() == "stub-chat-loop"
-        assert injected_bot.chat_loop_via_service(service_client=object()) == "stub-chat-loop-service"
-    finally:
-        injected_bot.shutdown()
+    injected_bot = make_test_dadbot(dependency_registry=dependency_registry, tenant_id="test-tenant")
+    assert injected_bot.runtime_interface is stub_runtime_interface
+    assert injected_bot.chat_loop() == "stub-chat-loop"
+    assert injected_bot.chat_loop_via_service(service_client=object()) == "stub-chat-loop-service"
 
 
-def test_dependency_registry_can_override_runtime_state_bundle(monkeypatch, tmp_path):
-    monkeypatch.setenv("DADBOT_MEMORY_PATH", str(tmp_path / "memory.json"))
-    monkeypatch.setenv("DADBOT_SEMANTIC_DB_PATH", str(tmp_path / "semantic.sqlite3"))
-    monkeypatch.setenv("DADBOT_GRAPH_DB_PATH", str(tmp_path / "graph.sqlite3"))
-    monkeypatch.setenv("DADBOT_SESSION_LOG_DIR", str(tmp_path / "session_logs"))
-
+def test_dependency_registry_can_override_runtime_state_bundle(make_test_dadbot):
     custom_store = InMemoryStateStore()
     custom_event_bus = InMemoryEventBus()
     custom_container = AppStateContainer(
@@ -353,14 +340,11 @@ def test_dependency_registry_can_override_runtime_state_bundle(monkeypatch, tmp_
         }
     }
 
-    injected_bot = DadBot(dependency_registry=dependency_registry)
-    try:
-        assert injected_bot._runtime_state_store is custom_store
-        assert injected_bot._runtime_event_bus is custom_event_bus
-        assert injected_bot._runtime_state is custom_container
-        assert injected_bot.runtime_state_container is custom_container
-    finally:
-        injected_bot.shutdown()
+    injected_bot = make_test_dadbot(dependency_registry=dependency_registry, tenant_id="test-tenant")
+    assert injected_bot._runtime_state_store is custom_store
+    assert injected_bot._runtime_event_bus is custom_event_bus
+    assert injected_bot._runtime_state is custom_container
+    assert injected_bot.runtime_state_container is custom_container
 
 
 def test_process_user_message_uses_graph_path_when_enabled(bot, monkeypatch):
@@ -601,7 +585,8 @@ def test_turn_processing_freeze_limits_legacy_entrypoints_to_dadbot_facade():
     assert "self.bot.execute_turn(" in runtime_interface
     assert "self.bot.execute_turn(" in runtime_services
     assert "self._bot.execute_turn(" in streamlit_runtime
-    assert "bot.execute_turn(" in app_runtime
+    assert "bot.chat_loop()" in app_runtime
+    assert "bot.chat_loop_via_service(client)" in app_runtime
     assert "turn_service.process_user_message" not in runtime_interface
     assert "turn_service.process_user_message" not in runtime_services
     assert "turn_service.process_user_message" not in streamlit_runtime
@@ -1561,13 +1546,9 @@ def test_validate_managers_smoke_true_passes(bot):
     bot._validate_managers(smoke=True)
 
 
-def test_smoke_init_under_pytest_skips_graph_init_background_task(monkeypatch, tmp_path):
+def test_smoke_init_under_pytest_skips_graph_init_background_task(monkeypatch, make_test_dadbot):
     monkeypatch.setenv("PYTEST_CURRENT_TEST", "tests::test_smoke_init")
     monkeypatch.setenv("DADBOT_VALIDATE_MANAGERS_SMOKE", "1")
-    monkeypatch.setenv("DADBOT_MEMORY_PATH", str(tmp_path / "memory.json"))
-    monkeypatch.setenv("DADBOT_SEMANTIC_DB_PATH", str(tmp_path / "semantic.sqlite3"))
-    monkeypatch.setenv("DADBOT_GRAPH_DB_PATH", str(tmp_path / "graph.sqlite3"))
-    monkeypatch.setenv("DADBOT_SESSION_LOG_DIR", str(tmp_path / "session_logs"))
 
     submit_calls = []
 
@@ -1579,11 +1560,8 @@ def test_smoke_init_under_pytest_skips_graph_init_background_task(monkeypatch, t
 
     monkeypatch.setattr(Dad.BackgroundTaskManager, "submit", fake_submit)
 
-    injected_bot = DadBot()
-    try:
-        assert all(call["kwargs"].get("task_kind") != "graph-init" for call in submit_calls)
-    finally:
-        injected_bot.shutdown()
+    make_test_dadbot(tenant_id="test-tenant")
+    assert all(call["kwargs"].get("task_kind") != "graph-init" for call in submit_calls)
 
 
 def test_runtime_client_tries_fallback_models_sync(bot, monkeypatch):

@@ -15,6 +15,7 @@ from __future__ import annotations
 from datetime import datetime
 from typing import Any
 
+from dadbot.core.event_clock import now as event_now
 from dadbot.core.write_plane import get_write_plane
 from dadbot.models import TurnPipelineSnapshot, TurnPipelineStep
 
@@ -38,7 +39,7 @@ class TurnStateMutator:
         wall_time = str(getattr(temporal, "wall_time", "") or "").strip()
         if wall_time:
             return wall_time
-        return datetime.now().isoformat(timespec="seconds")
+        return datetime.fromtimestamp(event_now()).isoformat(timespec="seconds")
 
     # ------------------------------------------------------------------
     # Pipeline state writes

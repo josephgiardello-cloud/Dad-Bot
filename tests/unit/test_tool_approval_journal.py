@@ -83,7 +83,7 @@ def test_approval_projections_copy_only_the_complete_relevant_event_sets(monkeyp
     complete_events = ledger.read()
     expected_latest = journal._latest(complete_events)
     copied_sets = []
-    original_copy = execution_ledger.deepcopy
+    original_copy = execution_ledger._copy_ledger_value
 
     def capture_copy(value):
         if isinstance(value, list):
@@ -93,7 +93,7 @@ def test_approval_projections_copy_only_the_complete_relevant_event_sets(monkeyp
         return original_copy(value)
 
     with monkeypatch.context() as patch:
-        patch.setattr(execution_ledger, "deepcopy", capture_copy)
+        patch.setattr(execution_ledger, "_copy_ledger_value", capture_copy)
         if operation == "latest":
             latest = journal._latest()
             assert latest == expected_latest

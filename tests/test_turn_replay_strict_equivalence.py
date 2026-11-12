@@ -16,9 +16,8 @@ pytestmark = [
 
 
 @pytest.mark.asyncio
-async def test_turn_replay_strict_equivalence(tmp_path):
+async def test_turn_replay_strict_equivalence(tmp_path, make_test_dadbot):
     """Replay turn must be hash-equivalent to live turn and execute zero live side effects."""
-    from dadbot.core.dadbot import DadBot
     from dadbot.core.orchestrator import DadBotOrchestrator
     from dadbot.core.persistence import SQLiteCheckpointer
 
@@ -47,7 +46,7 @@ async def test_turn_replay_strict_equivalence(tmp_path):
         context.metadata["execution_trace_context"] = trace_context
         return ("tool-path-ok", True)
 
-    live_bot = DadBot()
+    live_bot = make_test_dadbot()
     live_orchestrator = DadBotOrchestrator(bot=live_bot, strict=True, checkpointer=checkpointer)
     live_orchestrator._run_graph_with_trace_binding = _run_graph_with_tool
 
@@ -87,20 +86,20 @@ async def test_turn_replay_strict_equivalence(tmp_path):
             "manifest_hash": hashlib.sha256(b"strict-replay-manifest").hexdigest(),
         }
     checkpointer.save_checkpoint(
-        "strict-eq-replay",
-        "trace-strict-eq-replay-seed",
+        live_session_id,
+        live_context.trace_id,
         replay_seed,
         replay_manifest,
     )
 
-    replay_bot = DadBot()
+    replay_bot = make_test_dadbot()
     replay_orchestrator = DadBotOrchestrator(bot=replay_bot, strict=True, checkpointer=checkpointer)
     replay_orchestrator._run_graph_with_trace_binding = _run_graph_with_tool
-    replay_session_id = "strict-eq-replay"
+    replay_session_id = live_session_id
     await replay_orchestrator.handle_turn(
         live_user_input,
         session_id=replay_session_id,
-        confluence_key="strict-eq-replay-turn-1",
+        confluence_key="strict-eq-live-turn-1",
         metadata={"execution_mode": "replay"},
     )
 

@@ -58,7 +58,7 @@ async def test_submission_rebuilds_complete_lifecycle_without_copying_other_payl
         )
     plane.lifecycle_projection.rebuild_from_ledger(ledger.read())
     copied = []
-    original_copy = execution_ledger.deepcopy
+    original_copy = execution_ledger._copy_ledger_value
 
     def capture_copy(value):
         if isinstance(value, list):
@@ -67,7 +67,7 @@ async def test_submission_rebuilds_complete_lifecycle_without_copying_other_payl
         return original_copy(value)
 
     with monkeypatch.context() as patch, KernelGateway.open_scope():
-        patch.setattr(execution_ledger, "deepcopy", capture_copy)
+        patch.setattr(execution_ledger, "_copy_ledger_value", capture_copy)
         job, future, timestamp = await _register_submit_job_impl(
             plane, execution_job_type=ExecutionJob, session_key="shared", user_input="hello",
             attachments=None, metadata=metadata, trace_token="new-trace",
