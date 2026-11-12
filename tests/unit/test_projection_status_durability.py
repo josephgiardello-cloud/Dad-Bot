@@ -141,6 +141,90 @@ def test_latest_projection_attempt_wins_when_generation_is_tied(make_test_dadbot
     assert _reload_projection_status(bot)["semantic"]["status"] == "degraded"
 
 
+def test_overlapping_rebuild_publishes_failure_after_newer_attempts(make_test_dadbot, monkeypatch):
+    from concurrent.futures import ThreadPoolExecutor
+    from threading import Event, current_thread
+
+    monkeypatch.setenv("DADBOT_DURABLE_EXECUTION_LEDGER", "1")
+    bot = make_test_dadbot()
+    older = bot.memory_manager._storage
+    newer = MemoryStorageBackend(bot, bot.memory_manager)
+    original = bot.memory_manager.graph_manager.sync_graph_store
+    paused, release = Event(), Event()
+
+    def overlap(*, turn_context=None):
+        result = original(turn_context=turn_context)
+        if current_thread().name.startswith("older-rebuild"):
+            paused.set()
+            assert release.wait(30)
+            raise RuntimeError("Older rebuild failed after overlap")
+        return result
+
+    monkeypatch.setattr(bot.memory_manager.graph_manager, "sync_graph_store", overlap)
+    with ThreadPoolExecutor(max_workers=1, thread_name_prefix="older-rebuild") as executor:
+        pending = executor.submit(older.recover_local_projections)
+        try:
+            assert paused.wait(30)
+            newer.recover_local_projections()
+            newer.recover_local_projections()
+            published = _reload_projection_status(bot)["graph"]
+        finally:
+            release.set()
+        pending.result(timeout=30)
+    restored = _reload_projection_status(bot)["graph"]
+    assert restored["status"] == "degraded"
+    assert restored["generation"] > published["generation"]
+    assert restored["applied_revision"] == published["applied_revision"]
+
+
+def test_independent_status_writer_reallocates_generation_after_head_conflict(make_test_dadbot, monkeypatch):
+    monkeypatch.setenv("DADBOT_DURABLE_EXECUTION_LEDGER", "1")
+    bot = make_test_dadbot()
+    ledger = ExecutionLedger(FileWALLedgerBackend(bot.config.session_log_dir / "execution_ledger.jsonl"))
+    ledger.load_from_backend()
+    other = MemoryStorageBackend(SimpleNamespace(config=bot.config, _execution_ledger=ledger), bot.memory_manager)
+    old = other._load_projection_recovery_status()["semantic"]
+    storage = bot.memory_manager._storage
+    for _ in range(2):
+        current = storage._load_projection_recovery_status()["semantic"]
+        storage._persist_projection_recovery_status("semantic", {**current, "generation": current["generation"] + 1})
+    published = _reload_projection_status(bot)["semantic"]
+    other._persist_projection_recovery_status("semantic", {
+        **old, "status": "degraded", "error": "Independent writer failure",
+    })
+    restored = _reload_projection_status(bot)["semantic"]
+    assert restored["status"] == "degraded"
+    assert restored["generation"] > published["generation"]
+
+
+@pytest.mark.parametrize("same_source", [False, True])
+def test_late_failure_preserves_newer_applied_status(make_test_dadbot, monkeypatch, same_source):
+    from copy import deepcopy
+
+    monkeypatch.setenv("DADBOT_DURABLE_EXECUTION_LEDGER", "1")
+    bot = make_test_dadbot()
+    storage = bot.memory_manager._storage
+    old = storage._load_projection_recovery_status()["semantic"]
+    current = bot._execution_ledger.replay_tenant_memory(bot.config.tenant_id)
+    state = deepcopy(current.state)
+    state["last_mood"] = "positive"
+    bot._execution_ledger.commit_tenant_memory(
+        tenant_id=bot.config.tenant_id, expected_revision=current.revision,
+        operation_id="newer-rebuild-source", state=state,
+    )
+    storage._tenant_base_revision = current.revision + 1
+    storage.recover_local_projections()
+    published = _reload_projection_status(bot)["semantic"]
+    storage._persist_projection_recovery_status("semantic", {
+        **old, "generation": published["generation"] + 1,
+        "source_revision": published["source_revision"] if same_source else old["source_revision"],
+        "status": "degraded", "error": "Late failure for an older revision",
+    })
+    restored = _reload_projection_status(bot)["semantic"]
+    assert restored["status"] == ("degraded" if same_source else "sync_succeeded")
+    assert restored["applied_revision"] == published["applied_revision"]
+
+
 @pytest.mark.parametrize("projection", ["graph", "semantic"])
 @pytest.mark.parametrize("unavailable", [False, True])
 def test_recovery_propagates_authority_failures_without_publishing_status(
@@ -255,8 +339,16 @@ def test_recovery_uses_the_committed_catalog_not_staged_observation(make_test_da
 
 
 @pytest.mark.parametrize("outcome", ["sync_succeeded", "degraded"])
-def test_legacy_status_infers_only_known_applied_revisions(make_test_dadbot, monkeypatch, outcome):
+@pytest.mark.parametrize("prior_success", [False, True])
+def test_legacy_status_infers_only_known_applied_revisions(make_test_dadbot, monkeypatch, outcome, prior_success):
+    from dadbot.memory.semantic_manager import SemanticIndexManager
+
     monkeypatch.setenv("DADBOT_DURABLE_EXECUTION_LEDGER", "1")
+    if not prior_success:
+        def fail_initial_sync(_self, _memories):
+            raise RuntimeError("No previous semantic publication")
+
+        monkeypatch.setattr(SemanticIndexManager, "sync_semantic_memory_index", fail_initial_sync)
     bot = make_test_dadbot()
     previous = bot.memory_manager._storage._load_projection_recovery_status()["semantic"]
     _append_status_event(bot, {
@@ -264,7 +356,8 @@ def test_legacy_status_infers_only_known_applied_revisions(make_test_dadbot, mon
         "source_revision": previous["source_revision"], "updated_at": previous["updated_at"],
     })
     restored = _reload_projection_status(bot)["semantic"]
-    assert restored["applied_revision"] == (previous["source_revision"] if outcome == "sync_succeeded" else None)
+    expected = previous["source_revision"] if outcome == "sync_succeeded" or prior_success else None
+    assert restored["applied_revision"] == expected
     assert restored["dirty"] is (outcome != "sync_succeeded")
     assert restored["rebuild_reason"] == "legacy"
 

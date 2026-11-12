@@ -160,6 +160,19 @@ def _projection_status_metadata(status: dict, *, current_revision: int | None = 
     return status
 
 
+def _merge_projection_status(previous: dict | None, status: dict) -> dict:
+    if previous is None:
+        return status
+    applied = previous.get("applied_revision") or 0
+    source = status.get("source_revision")
+    # An older fenced rebuild cannot describe an index already applied at a newer revision.
+    if source is not None and source < applied:
+        return previous
+    if status["status"] != "sync_succeeded":
+        status["applied_revision"] = max(applied, status.get("applied_revision") or 0) or None
+    return status
+
+
 class _MemoryStoreParticipant:
     def __init__(self, backend: MemoryStorageBackend, previous_store: dict) -> None:
         self._backend = backend
@@ -331,7 +344,7 @@ class MemoryStorageBackend:
                     "dirty": False,
                     "updated_at": time.time(),
                 })
-            self._persist_projection_recovery_status(name, status)
+            status = self._persist_projection_recovery_status(name, status)
             self._projection_recovery_status[name] = status
 
     def _load_projection_recovery_status(self) -> dict[str, dict]:
@@ -361,9 +374,7 @@ class MemoryStorageBackend:
             ):
                 raise ValueError("Invalid tenant projection status event")
             status = _projection_status_metadata(status, current_revision=current_revision)
-            previous = latest.get(projection)
-            if previous is None or int(status.get("generation") or 0) >= int(previous.get("generation") or 0):
-                latest[projection] = deepcopy(status)
+            latest[projection] = _merge_projection_status(latest.get(projection), status)
         for name, revision in _required_projection_revisions(events, tenant_id).items():
             status = latest.get(name, {
                 "generation": 0, "source_revision": None, "applied_revision": None,
@@ -377,7 +388,7 @@ class MemoryStorageBackend:
         self._authorize_tenant_memory()
         return latest
 
-    def _persist_projection_recovery_status(self, projection: str, status: dict) -> None:
+    def _persist_projection_recovery_status(self, projection: str, status: dict) -> dict:
         from dadbot_system.delegation import tenant_mutation_fence
 
         self._authorize_tenant_memory()
@@ -408,12 +419,15 @@ class MemoryStorageBackend:
                     self.bot.config.tenant_id, required=self._authenticated_authority_required,
                 ):
                     self._authorize_tenant_memory()
-                    ledger.write(event)
-                return
+                    with ledger._lock:
+                        event["payload"]["status"]["generation"] = ledger.get_next_sequence()
+                        published = ledger.write(event)
+                return deepcopy(published["payload"]["status"])
             except LedgerHeadConflict:
                 if attempt == 2:
                     raise
                 ledger.load_from_backend()
+        raise RuntimeError("Projection status publication exhausted its retry budget")
 
     @contextmanager
     def fenced_semantic_index_write(self, memories, expected_revision=None):

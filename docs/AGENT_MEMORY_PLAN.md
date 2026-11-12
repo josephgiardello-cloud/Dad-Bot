@@ -174,7 +174,7 @@ loop-resume tests rather than duplicating their coverage.
 | Loop observation | Tenant-bound provider, committed memory/insight catalogs, verified semantic read fence | Implemented; does not publish access updates or schedule index repair |
 | Explicit semantic repair | Committed catalog and existing tenant revision/publication fences | Implemented; empty catalogs clear obsolete rows; failures propagate |
 | Ledger recall fallback | Live authority and canonical tenant/session filtering before the event limit | Implemented |
-| Projection recovery | Versioned ledger-backed status and tenant-qualified SQLite indexes | Source/applied revisions and failure recovery covered; adapter and concurrent-rebuild certification remain open |
+| Projection recovery | Versioned ledger-backed status and tenant-qualified SQLite indexes | Local publication ordering covered; adapter and multi-process rebuild certification remain open |
 | Loop snapshots | Tenant/session-hashed paths, exact payload ownership, live authority, atomic publication | Diagnostic snapshots hardened; canonical receipt reconciliation and production resume wiring remain open |
 | Executive startup tasks | Tenant-qualified Markdown boards, owner headers, live authority, and fenced atomic updates | Implemented; unowned legacy tasks are preserved but excluded |
 
@@ -242,16 +242,30 @@ Semantic recovery uses the committed catalog, not staged Observation state.
 Authority failures propagate rather than being recorded as backend degradation;
 status reads and publication revalidate live tenant authority.
 
-Legacy successful statuses infer an applied revision from their source; legacy
-failures leave it unknown. Invalid or future-revision metadata fails explicitly
-without rewriting ledger history. Metadata versioning does not certify every
-adapter's physical index schema or serialize concurrent rebuild generations.
+Legacy successful statuses infer an applied revision from their source. Failed
+statuses retain prior successful evidence, or leave the applied revision unknown
+when none exists. Invalid or future-revision metadata fails explicitly without
+rewriting ledger history. Metadata versioning does not certify every adapter's
+physical index schema.
 
-Projection repair validation: **202 passed, zero skips** across recovery,
+Projection repair (`8c129806`) validation: **202 passed, zero skips** across recovery,
 process-termination, authority, isolation, and architecture tests. The unchanged
 scale deadlines passed at 112.18 s / 120 s, 20.62 s / 60 s, and 8.96 s / 30 s.
 No new lint diagnostics; existing lint/type debt remains. This is targeted
 evidence, not a new full-suite result. Milestone 1 remains open.
+
+New projection generations use the ledger publication sequence, not a count of
+rebuild attempts. Allocation and append share the ledger lock; head-conflict
+retries allocate again after reload. Replay follows durable event order, retains
+known successful applied revisions on failure, and excludes reports older than
+the known applied revision from the current status. Superseded attempts remain
+in the audit history. Existing WAL/revision fences still guard index writes.
+
+Concurrent-publication validation: **208 passed, zero skips**, including
+overlapping rebuilds, independent ledger writers, late failures, and the existing
+stale-index/crash-recovery cases. Scale gates passed at 102.80 s / 120 s,
+20.80 s / 60 s, and 8.77 s / 30 s. No new lint diagnostics. Full-suite,
+multi-process rebuild, and non-SQLite adapter certification remain separate.
 
 ## 2. Certify memory-first observation
 
