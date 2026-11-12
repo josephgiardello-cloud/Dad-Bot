@@ -53,6 +53,7 @@ def setup_bot(request, make_test_dadbot, tmp_path):
     request.cls.temp_dir = temp_dir
     request.cls.cleanup_temp_dir = lambda self: temp_dir.cleanup()
     overrides = {
+        "tenant_id": "t1_aaaaaaaaaaaaaaaaaaaaaaaaaa",
         "graph_store_db_path": tmp_path / "dad_memory_graph.sqlite3",
         "memory_path": tmp_path / "dad_memory.json",
         "semantic_memory_db_path": tmp_path / "dad_memory_semantic.sqlite3",
@@ -498,7 +499,7 @@ class TestDadBotRegression(unittest.TestCase):
         from dadbot_system.security import ServicePrincipal
         from dadbot.core.memory_set_invariants import record_causal_step_locked
 
-        tenant_id = "t1_aaaaaaaaaaaaaaaaaaaaaaaaaa"
+        tenant_id = self.bot.config.tenant_id
         subject = "reminder-workflow-test"
         authority_path = Path(self.temp_dir.name) / "reminder-authority.sqlite"
         SQLiteDelegationStore.initialize(str(authority_path))

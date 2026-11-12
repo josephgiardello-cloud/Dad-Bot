@@ -30,17 +30,41 @@ product.
 
 ### Validation status
 
-The unfiltered default suite at `d02ac36d` passed on November 12, 2026: **4,659 passed,
-123 skipped, 10 expected failures, zero failures**. Test deadlines and production
-authority checks are unchanged.
+The latest unfiltered default suite passed on November 12, 2026: **4,743 passed,
+123 skipped, 10 expected failures, zero failures** in **1,361.19 seconds
+(22m 41s)**. The tested checkout was `827499a9` plus the fixture-only correction
+described below, published together with this record. No production code,
+acceptance deadlines, or authority checks changed.
 
-The original scale gates in [Phase 4A](../tests/test_phase4a.py) also passed:
+The first run on unchanged `827499a9` produced **4,742 passed, 123 skipped,
+10 expected failures, one failure** in 1,354.16 seconds. The failure in
+`test_reminder_tool_authorization_and_restart_idempotency` in the
+[regression module](../tests/test_dadbot_regression.py) reproduced alone:
+the initial fixture bot and authenticated reminder request had different tenant
+owners. The fixture now constructs its bot with an explicit canonical tenant;
+the request and restarted bot use that configured owner. Authorization denial,
+successful reminder creation, and restart idempotency remain asserted. The
+complete regression module then passed: **153 passed, 10 expected failures**.
+
+The final full rerun used no test selectors or marker exclusions:
+
+```powershell
+.\.venv\Scripts\python.exe -m pytest --basetemp <fresh-isolated-directory> -o faulthandler_timeout=0 --tb=short -ra --junitxml <report.xml>
+```
+
+`TEMP` and `TMP` used an isolated short path. The faulthandler override disables
+auxiliary stack dumps, not pytest-timeout or the scale acceptance limits.
+The [Phase 4A](../tests/test_phase4a.py) scale gates passed in that full run
+(JUnit elapsed case times):
 
 | Gate | Time | Limit |
 | --- | --- | --- |
-| 110 canonical turns | 117.64 s | 120 s |
-| Eight sessions, five turns each | 22.00 s | 60 s |
-| 20-turn exact pruning count | 10.00 s | 30 s |
+| 110 canonical turns | 115.36 s | 120 s |
+| Eight sessions, five turns each | 21.76 s | 60 s |
+| 20-turn exact pruning count | 9.56 s | 30 s |
+
+The earlier unfiltered baseline at `d02ac36d` was **4,659 passed, 123 skipped,
+10 expected failures, zero failures**.
 
 Baseline repairs cover tenant-qualified fixtures, materialized checkpoint views,
 same-request tool replay, deterministic pipeline clocks, selective-copy
