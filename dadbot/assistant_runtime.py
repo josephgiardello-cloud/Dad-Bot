@@ -20,7 +20,11 @@ class AssistantRuntime:
     """Stable, minimal assistant-facing facade over the execution kernel."""
 
     def __init__(self, kernel: Any, *, entrypoint: ExecutionEntry | None = None):
+        from dadbot_system.delegation import live_authority_audit_context
+
         self.kernel = kernel
+        self._executive_task_tenant = str(getattr(getattr(kernel, "config", None), "tenant_id", "") or "")
+        self._executive_authority_required = live_authority_audit_context()["authority_mode"] != "trusted_local"
         self._proactive_trigger_lock = Lock()
         self._processed_proactive_trigger_keys: set[str] = set()
         self._proactive_trigger_order: deque[str] = deque()
@@ -411,14 +415,18 @@ class AssistantRuntime:
 
         return sorted(get_registered_tool_names())
 
-    @staticmethod
-    def _executive_startup_observation(*, max_tasks: int = 8) -> str:
-        try:
-            from dadbot_system.local_mcp_server import get_pending_executive_tasks
+    def _executive_startup_observation(self, *, max_tasks: int = 8) -> str:
+        from dadbot_system.delegation import require_tenant_authority_if_active
+        from dadbot_system.execution_identity import require_scoped_tenant_id
+        from dadbot_system.local_mcp_server import get_pending_executive_tasks
+        from dadbot_system.security import AuthorizationError
 
-            tasks = list(get_pending_executive_tasks(limit=max(1, int(max_tasks))))
-        except Exception:
-            return ""
+        tenant = require_scoped_tenant_id(self._executive_task_tenant)
+        if str(getattr(getattr(self.kernel, "config", None), "tenant_id", "") or "") != tenant:
+            raise AuthorizationError("Executive task runtime tenant changed")
+        require_tenant_authority_if_active(tenant, required=self._executive_authority_required)
+        tasks = get_pending_executive_tasks(tenant_id=tenant, limit=max(1, int(max_tasks)))
+        require_tenant_authority_if_active(tenant, required=self._executive_authority_required)
 
         if not tasks:
             return ""

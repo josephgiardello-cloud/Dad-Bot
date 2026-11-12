@@ -53,6 +53,7 @@ def _mcp_token(
     tools: set[str],
     extra_scopes: frozenset[str] = frozenset(),
     ttl: int = 120,
+    tenant_id: str = TENANT,
 ):
     scopes = {lms.MCP_CONNECT_SCOPE, *extra_scopes}
     for tool_name in tools:
@@ -60,7 +61,7 @@ def _mcp_token(
         scopes.add(MCP_TOOL_BASE_SCOPES[tool_name])
     return manager.issue(
         subject="mcp-test-user",
-        tenant_id=TENANT,
+        tenant_id=tenant_id,
         scopes=scopes,
         allowed_tools=tools,
         ttl_seconds=ttl,
@@ -250,22 +251,36 @@ def test_streamable_http_requires_auth_and_only_lists_granted_tools(tmp_path: pa
 
 
 def test_markdown_task_roundtrip(monkeypatch: pytest.MonkeyPatch, tmp_path: pathlib.Path):
+    import json
+    import subprocess
+    import sys
+
     monkeypatch.setattr(lms, "_project_root", lambda: tmp_path)
 
-    path = lms._task_file_path()
+    path = lms._task_file_path(TENANT)
     tasks = [
         {"id": "tsk1", "title": "Ship release notes", "due": "2026-05-20T10:00:00", "priority": "high", "done": False},
         {"id": "tsk2", "title": "Archive old logs", "due": "", "priority": "low", "done": True},
     ]
 
-    lms._write_markdown_tasks(path, tasks)
-    loaded = lms._load_markdown_tasks(path)
+    lms._write_markdown_tasks(path, tasks, tenant_id=TENANT)
+    loaded = lms._load_markdown_tasks(path, tenant_id=TENANT)
 
     assert len(loaded) == 2
     assert loaded[0]["id"] == "tsk1"
     assert loaded[0]["done"] is False
     assert loaded[1]["id"] == "tsk2"
     assert loaded[1]["done"] is True
+    script = (
+        "import json, pathlib, sys; from dadbot_system import local_mcp_server as lms; "
+        "lms._project_root = lambda: pathlib.Path(sys.argv[1]); "
+        "print(json.dumps(lms.get_pending_executive_tasks(tenant_id=sys.argv[2])))"
+    )
+    restored = subprocess.run(
+        [sys.executable, "-c", script, str(tmp_path), TENANT],
+        capture_output=True, text=True, check=True, timeout=30,
+    )
+    assert json.loads(restored.stdout) == [loaded[0]]
 
 
 def test_python_function_refactor_rename_and_docstring(monkeypatch: pytest.MonkeyPatch, tmp_path: pathlib.Path):
@@ -320,7 +335,7 @@ def test_workspace_file_helpers(monkeypatch: pytest.MonkeyPatch, tmp_path: pathl
 def test_get_pending_executive_tasks_filters_and_limits(monkeypatch: pytest.MonkeyPatch, tmp_path: pathlib.Path):
     monkeypatch.setattr(lms, "_project_root", lambda: tmp_path)
 
-    path = lms._task_file_path()
+    path = lms._task_file_path(TENANT)
     lms._write_markdown_tasks(
         path,
         [
@@ -328,12 +343,165 @@ def test_get_pending_executive_tasks_filters_and_limits(monkeypatch: pytest.Monk
             {"id": "b", "title": "Done", "due": "", "priority": "low", "done": True},
             {"id": "c", "title": "Open 2", "due": "2026-05-19", "priority": "high", "done": False},
         ],
+        tenant_id=TENANT,
     )
 
-    pending = lms.get_pending_executive_tasks(limit=1)
+    pending = lms.get_pending_executive_tasks(tenant_id=TENANT, limit=1)
 
     assert len(pending) == 1
     assert pending[0]["done"] is False
+
+
+@pytest.mark.parametrize("operation", ["list", "complete"])
+def test_executive_tools_do_not_expose_or_complete_another_tenants_tasks(
+    monkeypatch, tmp_path, operation, make_test_dadbot,
+):
+    pytest.importorskip("mcp.server.mcpserver")
+    monkeypatch.setattr(lms, "_project_root", lambda: tmp_path)
+    tenant_b = "t1_" + "b" * 26
+    store, manager, authority = _authority(tmp_path)
+    tools = {"executive_add_task", "executive_list_tasks", "executive_complete_task"}
+    servers = {}
+    for tenant in (TENANT, tenant_b):
+        store.grant_membership(issuer="dadbot", subject="mcp-test-user", tenant_id=tenant, scopes={"read", "write"})
+        servers[tenant] = lms.build_server(
+            make_test_dadbot(tenant_id=tenant), authority=authority,
+        )
+
+    context_var, context_token = _access_context(_mcp_token(manager, tools=tools))
+    try:
+        added = servers[TENANT]._tool_manager._tools["executive_add_task"].fn("Tenant A private task")
+    finally:
+        context_var.reset(context_token)
+
+    context_var, context_token = _access_context(_mcp_token(manager, tools=tools, tenant_id=tenant_b))
+    try:
+        if operation == "list":
+            result = servers[tenant_b]._tool_manager._tools["executive_list_tasks"].fn()
+            assert result["tasks"] == []
+        else:
+            result = servers[tenant_b]._tool_manager._tools["executive_complete_task"].fn(added["task"]["id"])
+            assert result["completed"] is False
+    finally:
+        context_var.reset(context_token)
+
+    context_var, context_token = _access_context(_mcp_token(manager, tools=tools))
+    try:
+        result = servers[TENANT]._tool_manager._tools["executive_list_tasks"].fn()
+        assert [task["title"] for task in result["tasks"]] == ["Tenant A private task"]
+    finally:
+        context_var.reset(context_token)
+
+
+def test_executive_task_reads_require_explicit_tenant_without_creating_files(monkeypatch, tmp_path):
+    monkeypatch.setattr(lms, "_project_root", lambda: tmp_path)
+    with pytest.raises((TypeError, ValueError)):
+        lms.get_pending_executive_tasks()  # pyright: ignore[reportCallIssue]
+    assert lms.get_pending_executive_tasks(tenant_id=TENANT) == []
+    assert not (tmp_path / "session_logs").exists()
+
+
+def test_legacy_unowned_tasks_are_preserved_but_not_adopted(monkeypatch, tmp_path, caplog):
+    monkeypatch.setattr(lms, "_project_root", lambda: tmp_path)
+    legacy = tmp_path / "session_logs" / "executive_tasks.md"
+    legacy.parent.mkdir()
+    content = "# Dad-Bot Executive Tasks\n\n- [ ] Unassigned {id:legacy, due:, pri:normal}\n"
+    legacy.write_text(content, encoding="utf-8")
+
+    assert lms.get_pending_executive_tasks(tenant_id=TENANT) == []
+    assert legacy.read_text(encoding="utf-8") == content
+    assert list(legacy.parent.iterdir()) == [legacy]
+    assert "explicit tenant assignment" in caplog.text
+
+
+@pytest.mark.parametrize("damage", ["foreign_owner", "missing_owner", "malformed_row", "duplicate_ids", "invalid_utf8"])
+def test_executive_boards_fail_explicitly_on_invalid_authority(monkeypatch, tmp_path, damage):
+    monkeypatch.setattr(lms, "_project_root", lambda: tmp_path)
+    path = lms._task_file_path(TENANT)
+    path.parent.mkdir()
+    if damage == "invalid_utf8":
+        path.write_bytes(b"\xff")
+    else:
+        header = f"# Dad-Bot Executive Tasks\n<!-- tenant_id:{TENANT} -->\n"
+        row = "- [ ] Task {id:duplicate, due:, pri:normal}\n"
+        contents = {
+            "foreign_owner": f"# Dad-Bot Executive Tasks\n<!-- tenant_id:{'t1_' + 'b' * 26} -->\n",
+            "missing_owner": "# Dad-Bot Executive Tasks\n\n",
+            "malformed_row": header + "malformed row\n",
+            "duplicate_ids": header + row * 2,
+        }
+        path.write_text(contents[damage], encoding="utf-8")
+    before = path.read_bytes()
+    error = AuthorizationError if damage in {"foreign_owner", "missing_owner"} else ValueError
+    with pytest.raises(error):
+        lms.get_pending_executive_tasks(tenant_id=TENANT)
+    with pytest.raises(error):
+        lms._write_markdown_tasks(path, [], tenant_id=TENANT)
+    assert path.read_bytes() == before
+
+
+def test_failed_executive_publication_preserves_board_and_cleans_temporary_file(monkeypatch, tmp_path):
+    monkeypatch.setattr(lms, "_project_root", lambda: tmp_path)
+    path = lms._task_file_path(TENANT)
+    tasks = [{"id": "first", "title": "Original", "due": "", "priority": "normal", "done": False}]
+    lms._write_markdown_tasks(path, tasks, tenant_id=TENANT)
+    before = path.read_bytes()
+
+    def reject(_source, _destination):
+        raise OSError("Executive publication failed")
+
+    monkeypatch.setattr(lms.os, "replace", reject)
+    with pytest.raises(OSError, match="Executive publication failed"):
+        lms._write_markdown_tasks(path, [], tenant_id=TENANT)
+    assert path.read_bytes() == before
+    assert list(path.parent.iterdir()) == [path]
+
+
+def test_executive_task_fields_cannot_inject_additional_rows(monkeypatch, tmp_path):
+    monkeypatch.setattr(lms, "_project_root", lambda: tmp_path)
+    path = lms._task_file_path(TENANT)
+    lms._write_markdown_tasks(path, [], tenant_id=TENANT)
+    before = path.read_bytes()
+    task = {
+        "id": "second", "title": "First {id:first, due:, pri:normal}\n- [ ] Second",
+        "due": "", "priority": "normal", "done": False,
+    }
+    with pytest.raises(ValueError, match="single-line"):
+        lms._write_markdown_tasks(path, [task], tenant_id=TENANT)
+    assert path.read_bytes() == before
+
+
+def test_executive_updates_serialize_the_complete_read_modify_write(monkeypatch, tmp_path):
+    from concurrent.futures import ThreadPoolExecutor
+    from threading import Event
+
+    monkeypatch.setattr(lms, "_project_root", lambda: tmp_path)
+    first_entered, release, second_attempted, second_entered = Event(), Event(), Event(), Event()
+
+    def add(task_id, *, pause=False):
+        if not pause:
+            second_attempted.set()
+        with lms._executive_task_update(TENANT) as (path, tasks):
+            if pause:
+                first_entered.set()
+                assert release.wait(5)
+            else:
+                second_entered.set()
+            tasks.append({"id": task_id, "title": task_id, "due": "", "priority": "normal", "done": False})
+            lms._write_markdown_tasks(path, tasks, tenant_id=TENANT)
+
+    with ThreadPoolExecutor(max_workers=2) as executor:
+        first = executor.submit(add, "first", pause=True)
+        try:
+            assert first_entered.wait(5)
+            second = executor.submit(add, "second")
+            assert second_attempted.wait(5)
+            assert not second_entered.wait(0.2)
+        finally:
+            release.set()
+        first.result(timeout=5)
+        second.result(timeout=5)
+    assert {task["id"] for task in lms.get_pending_executive_tasks(tenant_id=TENANT)} == {"first", "second"}
 
 
 def test_persist_research_memory_syncs_and_writes_event():

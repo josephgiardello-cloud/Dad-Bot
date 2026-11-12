@@ -12,6 +12,11 @@ from dadbot.runtime.agent_driver_loop import AgentDriverLoop, DriverLoopPolicy
 pytestmark = pytest.mark.integration
 
 
+@pytest.fixture(autouse=True)
+def _isolated_task_workspace(monkeypatch, tmp_path):
+    monkeypatch.setattr("dadbot_system.local_mcp_server._project_root", lambda: tmp_path)
+
+
 # ---------------------------------------------------------------------------
 # Shared stubs
 # ---------------------------------------------------------------------------

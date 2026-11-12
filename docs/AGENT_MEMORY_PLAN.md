@@ -177,7 +177,7 @@ loop-resume tests rather than duplicating their coverage.
 | Ledger recall fallback | Live authority and canonical tenant/session filtering before the event limit | Implemented |
 | Projection recovery | Existing ledger-backed projection status and tenant-qualified indexes | Existing coverage retained; metadata completeness and adapter certification remain open |
 | Loop snapshots | Currently session-named JSON files, outside production AssistantRuntime wiring | Tenant ownership, corruption handling, and committed-progress binding remain open |
-| Executive startup tasks | Currently a global markdown task reader | Tenant ownership remains open |
+| Executive startup tasks | Tenant-qualified Markdown boards, owner headers, live authority, and fenced atomic updates | Implemented; unowned legacy tasks are preserved but excluded |
 
 Observation providers pass `record_access=False` to hybrid retrieval; custom
 hybrid adapters must accept that keyword. Ordinary retrieval retains access
@@ -191,12 +191,29 @@ ledger errors. Captured authenticated providers cannot downgrade to trusted-loca
 access when their authority context disappears, and retained contexts recheck
 membership after revocation. These repairs do not complete milestone 1.
 
-Targeted validation: **324 passed, 13 slow/stress tests skipped** across authority,
+Recall repair (`7755dcb7`) targeted validation: **324 passed, 13 slow/stress tests skipped** across authority,
 recall, recovery, isolation, and architecture checks. The unchanged scale gates
 passed in 101.21 s / 120 s, 13.41 s / 60 s, and 5.51 s / 30 s. The full suite was
 not rerun for this repair group. Changed-file syntax/import lint checks pass;
 overall lint remains non-clean, including argument-count and complexity
 diagnostics on the extended retrieval API.
+
+Executive task boards use `executive_tasks.<sha256-tenant-id>.md` under the
+workspace session-log directory and require an exact owner header. The pending
+reader requires `tenant_id`; missing boards return no tasks without creating
+files. Corrupt, duplicate-ID, or mismatched-owner boards fail explicitly.
+Mutations hold the tenant authority and file locks through atomic publication.
+Task fields must fit a single Markdown row; task IDs no longer depend on seconds.
+
+The old unowned board is neither read into observations nor reassigned on startup.
+Migration requires an operator to assign rows to verified owners and re-add them
+through each tenant's executive tools, retaining the original board.
+
+Executive-task repair validation: **230 passed, zero skips** across the task,
+MCP, UI continuation, driver, tenant, authority, and architecture selection.
+Coverage includes a fresh-process reload, cross-tenant read/completion attempts,
+corrupt-source preservation, failed publication, concurrent updates, and captured
+authority revocation. This is targeted evidence, not a new full-suite result.
 
 ## 2. Certify memory-first observation
 
