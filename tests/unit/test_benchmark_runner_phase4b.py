@@ -1,3 +1,5 @@
+from types import SimpleNamespace
+
 import pytest
 
 from tests.benchmark_runner import BenchmarkRunner
@@ -5,6 +7,33 @@ from tests.scenario_suite import Scenario
 from tests.trace_schema import NormalizedTrace, PlannerTrace
 
 pytestmark = pytest.mark.unit
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("fails", [False, True])
+async def test_orchestrator_without_context_returns_classified_result(fails):
+    async def handle_turn(**_kwargs):
+        if fails:
+            raise RuntimeError("controlled execution failure")
+        return "reply", False
+
+    runner = BenchmarkRunner(
+        mode="orchestrator",
+        orchestrator=SimpleNamespace(handle_turn=handle_turn),
+        sandbox_outputs=False,
+        disable_persistence_disk=False,
+    )
+    scenario = Scenario(name="missing_context", category="planning", input_text="hello")
+
+    result = await runner._run_scenario_orchestrator_async(scenario)
+
+    assert result["execution"]["completed"] is not fails
+    assert result["trace"]["raw_state"]["tool_call_counts"] == {}
+    if fails:
+        assert "controlled execution failure" in result["execution"]["error"]
+        assert result["execution_result"]["execution_error_class"] != "none"
+    else:
+        assert not result["execution"]["error"]
 
 
 def test_condense_capability_score_includes_phase4b_metrics():

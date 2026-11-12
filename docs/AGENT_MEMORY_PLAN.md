@@ -45,7 +45,16 @@ product.
 - Regression, hybrid, and authority checks now pass 192 cases, with 10 expected
   failures. Memory-manager checks pass 72 cases, with 13 skips. Short Windows
   temporary paths avoid failures creating long backup filenames.
-- The unfiltered baseline is still being collected; milestone 0 remains open.
+- The latest unfiltered diagnostic stopped after 1,396 passes, 104 skips,
+  10 expected failures, 3 failures, and 7 setup errors. The next repairs address
+  Phase 4A fixture scope, missing mocks, invalid helper names, and benchmark
+  error reporting; the separate-process checkpoint test now executes real turns.
+- The repaired Phase 4A/harness/authority selection passes 81 cases with one
+  pre-existing skip. A separate 8-session/40-turn isolation check also passes.
+- Milestone 0 remains open. The 110-turn checkpoint soak exceeds its unchanged
+  120-second limit, and the 20-turn pruning check exceeds 30 seconds. Timeout
+  stacks show ledger refresh, validation, and deep-copy work. Neither the full
+  baseline nor long-run performance is certified.
 - The tagged
   [durable submission authority suite](../tests/unit/test_durable_submission_authority.py)
   passes 29 cases. It covers delegation, revocation, worker execution, and
