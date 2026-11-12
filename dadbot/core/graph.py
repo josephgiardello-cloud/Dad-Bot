@@ -34,6 +34,7 @@ from dadbot.core.execution_receipt import (
     DEFAULT_SIGNER as _DEFAULT_RECEIPT_SIGNER,
 )
 from dadbot.core.execution_receipt import (
+    ReceiptChain,
     ReceiptSigner,
 )
 from dadbot.core.graph_context import (  # re-export turn-scoped state
@@ -342,6 +343,82 @@ class TurnGraph:
         all processes.
         """
         self._receipt_signer = signer
+
+    @property
+    def receipt_signer(self) -> ReceiptSigner:
+        """Return the configured signer without exposing its key material."""
+        return self._receipt_signer
+
+    def _record_stage_receipt(
+        self,
+        turn_context: TurnContext,
+        *,
+        stage_name: str,
+        idx: int,
+        checkpoint_hash: str,
+    ) -> None:
+        stage_key = str(stage_name or "").strip()
+        trace_id = str(turn_context.trace_id or "").strip()
+        if not trace_id or not stage_key or len(stage_key) > 120:
+            raise RuntimeExecutionError("Execution receipt stage name is invalid")
+        expected_stages = turn_context.state.setdefault("_receipt_expected_stages", [])
+        if not isinstance(expected_stages, list) or len(expected_stages) >= 64:
+            raise RuntimeExecutionError("Execution receipt stage limit exceeded")
+        stage_call_id = hashlib.sha256(
+            f"{trace_id}:{stage_key}:{idx}".encode("utf-8"),
+        ).hexdigest()[:32]
+        try:
+            self._side_effect_adapter.record_receipt(
+                turn_context,
+                stage_key,
+                signer=self._receipt_signer,
+                stage_call_id=stage_call_id,
+                checkpoint_hash=checkpoint_hash,
+            )
+        except (TypeError, ValueError) as exc:
+            raise RuntimeExecutionError("Execution receipt chain could not be extended") from exc
+        expected_stages.append(stage_key)
+
+    def _finalize_execution_receipts(self, turn_context: TurnContext) -> None:
+        turn_context.metadata.pop("execution_receipt_evidence", None)
+        turn_context.metadata.pop("execution_receipt_status", None)
+        if not self._receipt_signer.is_stable:
+            turn_context.metadata["execution_receipt_status"] = "unavailable_unstable_signer"
+            return
+
+        chain = ReceiptChain.from_state(turn_context.state)
+        expected_stages = turn_context.state.get("_receipt_expected_stages")
+        if not isinstance(expected_stages, list):
+            turn_context.metadata["execution_receipt_status"] = "unavailable_no_stage_receipts"
+            return
+        if not chain:
+            if expected_stages:
+                raise RuntimeExecutionError("Execution receipt chain is missing expected stage receipts")
+            turn_context.metadata["execution_receipt_status"] = "unavailable_no_stage_receipts"
+            return
+        if (
+            len(chain) > 64
+            or len(expected_stages) > 64
+            or any(type(stage) is not str or not stage for stage in expected_stages)
+            or [receipt.stage for receipt in chain.receipts] != expected_stages
+        ):
+            raise RuntimeExecutionError("Execution receipt stages do not match the completed pipeline")
+
+        violations = chain.verify_continuity(
+            self._receipt_signer,
+            expected_stages=expected_stages,
+            expected_turn_id=str(turn_context.trace_id or ""),
+        )
+        if violations:
+            raise RuntimeExecutionError("Execution receipt chain failed continuity verification")
+        turn_context.metadata["execution_receipt_evidence"] = {
+            "schema_version": 1,
+            "trace_id": str(turn_context.trace_id or ""),
+            "key_id": self._receipt_signer.key_id,
+            "stages": list(expected_stages),
+            "receipts": chain.to_list(),
+        }
+        turn_context.metadata["execution_receipt_status"] = "verified"
 
     def _rejection_semantics_for_stage(self, stage: str) -> KernelRejectionSemantics:
         return self._side_effects.rejection_semantics_for_stage(stage)
@@ -849,7 +926,7 @@ class TurnGraph:
         status: str,
         persistence_service: Any,
         persistence_is_lightweight: bool,
-    ) -> None:
+    ) -> dict[str, Any]:
         checkpoint_payload = self._checkpoint_payload(
             turn_context,
             stage_name=stage_name,
@@ -889,6 +966,7 @@ class TurnGraph:
             persistence_service=persistence_service,
             persistence_is_lightweight=persistence_is_lightweight,
         )
+        return checkpoint_payload
 
     def _finalize_trace_contract(self, turn_context: TurnContext, *, expected_hash: str = "") -> dict[str, Any]:
         trace = list(turn_context.state.get("execution_trace") or [])
@@ -1412,13 +1490,33 @@ class TurnGraph:
             )
             raise
 
-        self._emit_checkpoint(
+        after_checkpoint = self._emit_checkpoint(
             turn_context,
             stage_name=stage_key,
             status="after",
             persistence_service=persistence_service,
             persistence_is_lightweight=persistence_is_lightweight,
         )
+        receipt_signer = getattr(self, "_receipt_signer", None)
+        if not stage_skipped and bool(getattr(receipt_signer, "is_stable", False)):
+            checkpoint_hash = str(after_checkpoint.get("checkpoint_hash") or "")
+            if not checkpoint_hash:
+                checkpoint_hash = str(
+                    turn_context.checkpoint_snapshot(
+                        stage=stage_key,
+                        status="after",
+                        advance_chain=False,
+                    ).get("checkpoint_hash")
+                    or "",
+                )
+            if not checkpoint_hash:
+                raise RuntimeExecutionError(f"Execution receipt checkpoint hash is missing for {stage_key}")
+            self._record_stage_receipt(
+                turn_context,
+                stage_name=stage_key,
+                idx=idx,
+                checkpoint_hash=checkpoint_hash,
+            )
 
         self._maybe_transition_phase(
             turn_context,
@@ -1529,6 +1627,7 @@ class TurnGraph:
         turn_context.state["_pipeline_stage_names"] = [
             str(name or "").strip().lower() for name, _node in pipeline_items if str(name or "").strip()
         ]
+        turn_context.state["_receipt_expected_stages"] = []
         persistence_service = self._resolve_persistence_service()
         persistence_is_lightweight = self._is_lightweight_persistence(persistence_service)
         if persistence_service is not None:
@@ -1562,6 +1661,7 @@ class TurnGraph:
                 stage="post_execute",
                 operation="turn_graph.execute.post_execute",
             )
+            self._finalize_execution_receipts(turn_context)
             with contextlib.suppress(Exception):
                 self._record_execution_trace(
                     turn_context,

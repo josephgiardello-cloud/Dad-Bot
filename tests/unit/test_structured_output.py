@@ -154,6 +154,12 @@ class TestBuildReflectionPrompt:
             "initial_observation": "hi",
             "observation": "memory-first context",
             "goal_blackboard": {"status": "in progress"},
+            "tool_outcome_evidence": {
+                "schema_version": 1,
+                "trace_id": "trace-1",
+                "outcomes": [],
+                "truncated": False,
+            },
             "memory_signals": {"conflicts": [], "temporal": [{"event_time": "2026-01-01"}]},
             "records": [],
         }
@@ -163,7 +169,9 @@ class TestBuildReflectionPrompt:
         assert "turn_index" in payload
         assert payload["observation"] == "memory-first context"
         assert payload["goal_blackboard"] == {"status": "in progress"}
+        assert payload["tool_outcome_evidence"]["trace_id"] == "trace-1"
         assert payload["memory_signals"]["temporal"][0]["event_time"] == "2026-01-01"
+        assert "not proof of a goal" in msgs[0]["content"]
 
     def test_tool_names_appear_in_system_prompt(self) -> None:
         ctx = {"turn_index": 1, "last_reply": "", "initial_observation": "", "records": []}

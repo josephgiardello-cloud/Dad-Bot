@@ -4,8 +4,9 @@ Tier 3 (Execution Receipts), and the side-effect deduplication fix.
 
 from __future__ import annotations
 
+import asyncio
 from pathlib import Path
-from unittest.mock import MagicMock
+from unittest.mock import AsyncMock, MagicMock, Mock
 
 import pytest
 
@@ -504,6 +505,19 @@ class TestCapabilitySnapshot:
 
 
 class TestExecutionReceipt:
+    def test_only_stable_configured_keys_are_durable(self, monkeypatch) -> None:
+        from dadbot.core.execution_receipt import ReceiptSigner
+
+        monkeypatch.delenv("DADBOT_RECEIPT_KEY", raising=False)
+        assert not ReceiptSigner().is_stable
+        assert not ReceiptSigner(secret_key=b"k" * 31).is_stable
+        assert ReceiptSigner(secret_key=b"k" * 32).is_stable
+
+        monkeypatch.setenv("DADBOT_RECEIPT_KEY", "short")
+        assert not ReceiptSigner().is_stable
+        monkeypatch.setenv("DADBOT_RECEIPT_KEY", "k" * 32)
+        assert ReceiptSigner().is_stable
+
     def test_sign_and_verify(self) -> None:
         from dadbot.core.execution_receipt import ReceiptSigner
 
@@ -613,6 +627,20 @@ class TestReceiptChain:
         violations = chain.verify_continuity(signer, expected_stages=["temporal", "inference"])
         assert any("inference" in v.reason for v in violations)
 
+    def test_expected_stages_must_be_in_order_and_for_the_expected_turn(self) -> None:
+        from dadbot.core.execution_receipt import ReceiptSigner
+
+        signer = ReceiptSigner(secret_key=b"k" * 32)
+        chain = self._build_chain(signer, ["inference", "temporal"])
+        order_violations = chain.verify_continuity(
+            signer,
+            expected_stages=["temporal", "inference"],
+            expected_turn_id="t",
+        )
+        turn_violations = chain.verify_continuity(signer, expected_turn_id="other")
+        assert any("missing from receipt chain" in item.reason for item in order_violations)
+        assert all("not 'other'" in item.reason for item in turn_violations)
+
     def test_tampered_receipt_detected(self) -> None:
         from dadbot.core.execution_receipt import ExecutionReceipt, ReceiptChain, ReceiptSigner
 
@@ -669,3 +697,90 @@ class TestReceiptChain:
         signer = ReceiptSigner(secret_key=b"stable" + b"\x00" * 26)
         graph.configure_receipt_signer(signer)
         assert graph._receipt_signer is signer
+
+    def test_graph_emits_and_verifies_receipts_only_with_stable_signer(self) -> None:
+        from dadbot.core.execution_receipt import ReceiptChain, ReceiptSigner
+        from dadbot.core.graph import TurnContext, TurnGraph
+
+        graph = TurnGraph(nodes=[])
+        graph.configure_receipt_signer(ReceiptSigner(secret_key=b"k" * 32))
+
+        async def execute(_node, context):
+            return context
+
+        graph._execute_node = AsyncMock(side_effect=execute)
+        graph._enforce_kernel_invariants = Mock()
+        graph._maybe_transition_phase = Mock()
+        graph._record_edge_transition = Mock()
+        context = TurnContext(user_input="receipt test")
+        asyncio.run(
+            graph._run_stage(
+                idx=0,
+                pipeline_items=[("custom", object())],
+                turn_context=context,
+                emitted_phases=set(),
+                persistence_service=None,
+                persistence_is_lightweight=True,
+            ),
+        )
+        graph._finalize_execution_receipts(context)
+        evidence = context.metadata["execution_receipt_evidence"]
+        assert context.metadata["execution_receipt_status"] == "verified"
+        assert evidence["stages"] == ["custom"]
+        assert ReceiptChain.from_state(context.state).verify_continuity(
+            graph.receipt_signer,
+            expected_stages=["custom"],
+            expected_turn_id=context.trace_id,
+        ) == []
+
+        context.state["_execution_receipts"][0]["checkpoint_hash"] = "tampered"
+        with pytest.raises(RuntimeError, match="continuity verification"):
+            graph._finalize_execution_receipts(context)
+        assert "execution_receipt_status" not in context.metadata
+        context.state["_execution_receipts"] = []
+        with pytest.raises(RuntimeError, match="missing expected stage receipts"):
+            graph._finalize_execution_receipts(context)
+
+        ephemeral_graph = TurnGraph(nodes=[])
+        ephemeral_graph.configure_receipt_signer(ReceiptSigner(secret_key=b"e" * 31))
+        ephemeral_graph._execute_node = AsyncMock(side_effect=execute)
+        ephemeral_graph._enforce_kernel_invariants = Mock()
+        ephemeral_graph._maybe_transition_phase = Mock()
+        ephemeral_graph._record_edge_transition = Mock()
+        context_without_receipts = TurnContext(user_input="receipt test")
+        asyncio.run(
+            ephemeral_graph._run_stage(
+                idx=0,
+                pipeline_items=[("custom", object())],
+                turn_context=context_without_receipts,
+                emitted_phases=set(),
+                persistence_service=None,
+                persistence_is_lightweight=True,
+            ),
+        )
+        ephemeral_graph._finalize_execution_receipts(context_without_receipts)
+        assert context_without_receipts.metadata["execution_receipt_status"] == "unavailable_unstable_signer"
+        assert "execution_receipt_evidence" not in context_without_receipts.metadata
+
+    def test_graph_execute_finalizes_receipts_on_success(self) -> None:
+        from dadbot.core.execution_receipt import ReceiptSigner
+        from dadbot.core.graph import TurnContext, TurnGraph
+
+        class ReceiptStage:
+            def __init__(self, name):
+                self.name = name
+
+            async def run(self, context):
+                context.state.setdefault("candidate", "reply")
+                return context
+
+        graph = TurnGraph(nodes=[ReceiptStage("custom"), ReceiptStage("save")])
+        graph.configure_receipt_signer(ReceiptSigner(secret_key=b"k" * 32))
+        context = TurnContext(user_input="receipt execution")
+
+        asyncio.run(graph.execute(context))
+
+        evidence = context.metadata["execution_receipt_evidence"]
+        assert context.metadata["execution_receipt_status"] == "verified"
+        assert evidence["trace_id"] == context.trace_id
+        assert evidence["stages"] == ["custom", "save"]

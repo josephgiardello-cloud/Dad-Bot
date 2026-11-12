@@ -138,12 +138,137 @@ def test_driver_loop_reflects_on_observation_and_ledger_records_goal_board():
     assert contexts[1]["goal_blackboard"] == {"status": "in progress"}
     assert result.goal_blackboard == {"status": "in progress"}
     assert kernel.requests[0].context.tenant_id == "tenant-a"
-    assert kernel.requests[0].metadata["agent_loop"] == {
-        "turn_index": 1,
-        "goal_blackboard": {"status": "in progress"},
-        "plan_verification": "passed",
-        "trigger_type": "interactive",
+    assert kernel.requests[0].context.request_id == kernel.requests[0].metadata["request_id"]
+    assert kernel.requests[0].metadata["agent_loop"]["turn_index"] == 1
+    assert kernel.requests[0].metadata["agent_loop"]["goal_blackboard"] == {}
+    assert kernel.requests[0].metadata["agent_loop"]["plan_verification"] == "passed"
+    assert kernel.requests[0].metadata["agent_loop"]["trigger_type"] == "interactive"
+    assert kernel.requests[0].metadata["agent_loop"]["schema_version"] == 1
+    assert kernel.requests[0].metadata["agent_loop"]["loop_run_id"]
+
+
+def test_driver_loop_passes_canonical_hash_only_outcomes_to_next_reflection():
+    kernel = _KernelStub(replies=[("tool ran", False), ("finished", True)])
+    contexts = []
+    evidence = {
+        "schema_version": 1,
+        "trace_id": "trace-1",
+        "outcomes": [
+            {
+                "event_id": "00000000-0000-4000-8000-000000000001",
+                "event_checksum": f"evtchk-{'a' * 64}",
+                "previous_checksum": "",
+                "trace_id": "trace-1",
+                "tool_name": "safe_tool",
+                "status": "succeeded",
+                "authorization_decision": "allowed",
+                "authority_mode": "trusted_local",
+                "input_hash": "b" * 64,
+                "output_hash": "c" * 64,
+            },
+        ],
+        "truncated": False,
     }
+
+    def completion_reader(request_id, session_id, tenant_id):
+        request = next(item for item in kernel.requests if item.metadata["request_id"] == request_id)
+        return {
+            "tenant_id": tenant_id,
+            "session_id": session_id,
+            "request_id": request_id,
+            "trace_id": "trace-1",
+            "metadata": {
+                "agent_loop": request.metadata["agent_loop"],
+                "tool_outcome_evidence": evidence,
+            },
+        }
+
+    loop = AgentDriverLoop(
+        kernel,
+        policy=DriverLoopPolicy(max_turns=2),
+        commit_verifier=completion_reader,
+    )
+    result = loop.run(
+        "run the tool",
+        reflection_hook=lambda ctx: (
+            contexts.append(ctx) or {"action_input": "continue"}
+        ),
+    )
+
+    assert contexts[1]["tool_outcome_evidence"] == evidence
+    assert result.tool_outcome_evidence == evidence
+    assert result.completed_turns == 2
+
+
+def test_driver_loop_rejects_cross_scope_canonical_completion_metadata():
+    kernel = _KernelStub(replies=[("untrusted", True)])
+    loop = AgentDriverLoop(
+        kernel,
+        commit_verifier=lambda request_id, session_id, _tenant_id: {
+            "tenant_id": "other-tenant",
+            "session_id": session_id,
+            "request_id": request_id,
+            "trace_id": "trace-1",
+            "metadata": {},
+        },
+    )
+
+    with pytest.raises(ValueError, match="scope"):
+        loop.run(
+            "start",
+            tenant_id="tenant-a",
+            reflection_hook=lambda _ctx: {
+                "action_input": "continue",
+                "goal_updates": {"status": "advanced"},
+            },
+        )
+
+
+def test_driver_loop_does_not_advance_without_canonical_completion():
+    kernel = _KernelStub(replies=[("unverified", True)])
+    loop = AgentDriverLoop(
+        kernel,
+        policy=DriverLoopPolicy(max_turns=3),
+        commit_verifier=lambda _request_id, _session_id, _tenant_id: False,
+    )
+
+    result = loop.run(
+        "start",
+        reflection_hook=lambda _ctx: {
+            "action_input": "continue",
+            "goal_updates": {"status": "advanced"},
+        },
+        initial_goal_blackboard={"status": "pending"},
+    )
+
+    assert result.stop_reason == "commit_unverified"
+    assert result.completed_turns == 0
+    assert result.goal_blackboard == {"status": "pending"}
+    assert result.records[0].commit_status == "uncertain"
+    assert result.records[0].error == "Canonical JOB_COMPLETED evidence is missing for the request"
+
+
+def test_driver_loop_stops_as_uncertain_when_dispatch_raises_with_verifier():
+    kernel = _FailingKernelStub(fail_count=1)
+    loop = AgentDriverLoop(
+        kernel,
+        policy=DriverLoopPolicy(max_turns=3, max_failures=2),
+        commit_verifier=lambda _request_id, _session_id, _tenant_id: False,
+    )
+
+    result = loop.run(
+        "start",
+        reflection_hook=lambda _ctx: {
+            "action_input": "possibly side-effecting action",
+            "goal_updates": {"status": "advanced"},
+        },
+    )
+
+    assert result.stop_reason == "commit_unverified"
+    assert result.failures == 0
+    assert result.completed_turns == 0
+    assert result.goal_blackboard == {}
+    assert result.records[0].commit_status == "uncertain"
 
 
 def test_driver_loop_rejects_invalid_plan_before_kernel_dispatch():

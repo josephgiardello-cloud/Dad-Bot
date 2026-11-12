@@ -7,6 +7,7 @@ import json as _json
 import logging
 import os
 import platform
+from copy import deepcopy
 from datetime import datetime, timedelta, timezone
 from importlib import metadata as importlib_metadata
 from pathlib import Path
@@ -24,6 +25,7 @@ from dadbot.contracts import (
     SovereignEventType,
 )
 from dadbot.core import shadow_mode as _shadow_mode
+from dadbot.core.agent_loop_progress import normalize_tool_outcome_evidence
 from dadbot.core.composite_friction import CompositeFrictionEngine, FrictionSignals
 from dadbot.core.control_plane import (
     ControlPlaneOptions,
@@ -854,8 +856,15 @@ class DadBotOrchestrator:
                 bot._last_capability_audit_report = audit_report
 
     @staticmethod
-    def _tool_action_audit_from_context(context: TurnContext, *, limit: int = 50) -> list[dict[str, Any]]:
+    def _tool_action_audit_from_context(
+        context: TurnContext,
+        *,
+        limit: int = 50,
+        trace_id: str | None = None,
+        strict: bool = False,
+    ) -> list[dict[str, Any]]:
         actions: list[dict[str, Any]] = []
+        action_limit = max(1, int(limit))
         previous_checksum = ""
         try:
             for raw_event in list(context.state.get("sovereign_events") or []):
@@ -865,7 +874,9 @@ class DadBotOrchestrator:
                 if not event.verify_checksum(previous_checksum):
                     raise ValueError("Sovereign event checksum chain is invalid")
                 previous_checksum = event.checksum
-                if event.event_type != "TOOL_EXECUTION":
+                if event.event_type != "TOOL_EXECUTION" or (
+                    trace_id is not None and event.turn_id != trace_id
+                ):
                     continue
                 payload = event.payload.model_dump(mode="json")
                 tool_name = str(payload.get("tool_name") or "")[:128]
@@ -896,10 +907,14 @@ class DadBotOrchestrator:
                         "output_hash": output_hash,
                     }
                 )
-        except (TypeError, ValueError):
+                if len(actions) > action_limit:
+                    actions.pop(0)
+        except (TypeError, ValueError) as exc:
+            if strict:
+                raise RuntimeError("Tool outcome evidence rejected an invalid event stream") from exc
             logger.error("Tool action audit projection rejected an invalid event stream")
             return []
-        return actions[-max(1, int(limit)):]
+        return actions
 
     def _attach_runtime_ledger_emit(self, context: TurnContext, job: ExecutionJob) -> None:
         try:
@@ -1060,6 +1075,64 @@ class DadBotOrchestrator:
         manifest: dict[str, Any],
         loaded_checkpoint_anchor: str,
     ) -> None:
+        metadata = job.metadata if isinstance(job.metadata, dict) else {}
+        if isinstance(metadata.get("agent_loop"), dict):
+            trace_id = str(context.trace_id or "")
+            audit = self._tool_action_audit_from_context(
+                context,
+                limit=17,
+                trace_id=trace_id,
+                strict=True,
+            )
+            outcome_fields = (
+                "event_id",
+                "event_checksum",
+                "previous_checksum",
+                "trace_id",
+                "tool_name",
+                "status",
+                "authorization_decision",
+                "authority_mode",
+                "input_hash",
+                "output_hash",
+            )
+            job.metadata["tool_outcome_evidence"] = normalize_tool_outcome_evidence(
+                {
+                    "schema_version": 1,
+                    "trace_id": trace_id,
+                    "outcomes": [
+                        {field: action[field] for field in outcome_fields}
+                        for action in audit[-16:]
+                    ],
+                    "truncated": len(audit) > 16,
+                },
+                expected_trace_id=trace_id,
+            )
+            receipt_status = str(context.metadata.get("execution_receipt_status") or "unavailable")
+            job.metadata["execution_receipt_status"] = receipt_status
+            job.metadata.pop("execution_receipt_evidence", None)
+            if receipt_status == "verified":
+                receipt_evidence = context.metadata.get("execution_receipt_evidence")
+                if (
+                    type(receipt_evidence) is not dict
+                    or receipt_evidence.get("schema_version") != 1
+                    or receipt_evidence.get("trace_id") != trace_id
+                    or type(receipt_evidence.get("key_id")) is not str
+                    or not receipt_evidence["key_id"]
+                    or type(receipt_evidence.get("stages")) is not list
+                    or type(receipt_evidence.get("receipts")) is not list
+                    or not receipt_evidence["stages"]
+                    or len(receipt_evidence["stages"]) > 64
+                    or len(receipt_evidence["receipts"]) != len(receipt_evidence["stages"])
+                    or [
+                        receipt.get("stage")
+                        for receipt in receipt_evidence["receipts"]
+                        if type(receipt) is dict
+                    ]
+                    != receipt_evidence["stages"]
+                ):
+                    raise RuntimeError("Verified execution receipt evidence is malformed")
+                job.metadata["execution_receipt_evidence"] = deepcopy(receipt_evidence)
         self._emit_sovereign_event(
             context,
             event_type=SovereignEventType.PLANNER_DECISION,

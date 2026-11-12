@@ -6,6 +6,11 @@ from collections import deque
 from threading import Lock
 from typing import Any
 
+from dadbot.core.agent_loop_progress import (
+    reconcile_committed_agent_loop_progress,
+    read_agent_loop_goal_blackboard,
+    read_agent_loop_tool_outcome_evidence,
+)
 from dadbot.core.execution_contract import ExecutionEntry, TurnDelivery, live_turn_request
 from dadbot.runtime.agent_driver_loop import AgentDriverLoop, DriverLoopPolicy, DriverLoopResult
 from dadbot.runtime.context_pruner import ContextWindowPruner, build_pruned_observation_hook
@@ -308,12 +313,69 @@ class AssistantRuntime:
         semantic_sync_index: bool = False,
     ) -> DriverLoopResult:
         loop_policy = policy or DriverLoopPolicy()
+        tenant_id = str(getattr(getattr(self.kernel, "config", None), "tenant_id", "default") or "default")
+        turn_orchestrator = getattr(self.kernel, "turn_orchestrator", None)
+        control_plane = getattr(turn_orchestrator, "control_plane", None)
+        if control_plane is None:
+            control_plane = getattr(self.kernel, "control_plane", None)
+        initial_goal_blackboard: dict[str, str] = {}
+        initial_tool_outcome_evidence: dict[str, Any] | None = None
+        commit_verifier = None
+        if control_plane is not None:
+            session = control_plane.registry.get_or_create(session_id, tenant_id=tenant_id)
+            session_state = dict(session.get("state") or {})
+            ledger_index = getattr(control_plane, "_ledger_index", None)
+            completed_metadata = getattr(ledger_index, "completed_metadata", None)
+            completed_agent_loop_entries = getattr(ledger_index, "completed_agent_loop_entries", None)
+            if not callable(completed_metadata) or not callable(completed_agent_loop_entries):
+                raise RuntimeError("Agent loop requires canonical completion lookup on its control plane")
+            entries = completed_agent_loop_entries(session_id=session_id, tenant_id=tenant_id)
+            if reconcile_committed_agent_loop_progress(
+                session_state,
+                completed_entries=entries,
+                tenant_id=tenant_id,
+                session_id=session_id,
+            ):
+                last_committed = session_state["agent_loop_progress"]["last_committed"]
+                merge_session_state = getattr(control_plane, "_merge_session_state", None)
+                if not callable(merge_session_state):
+                    raise RuntimeError("Agent loop cannot persist reconciled canonical progress")
+                merge_session_state(
+                    session_id=session_id,
+                    state_patch={"agent_loop_progress": session_state["agent_loop_progress"]},
+                    trace_token=last_committed["trace_id"],
+                    tenant_id=tenant_id,
+                )
+            initial_goal_blackboard = read_agent_loop_goal_blackboard(
+                session_state,
+                tenant_id=tenant_id,
+                session_id=session_id,
+            )
+            initial_tool_outcome_evidence = read_agent_loop_tool_outcome_evidence(
+                session_state,
+                tenant_id=tenant_id,
+                session_id=session_id,
+            )
+
+            def verify_completion(request_id: str, sid: str, tid: str) -> dict[str, Any] | None:
+                return completed_metadata(
+                    session_id=sid,
+                    request_id=request_id,
+                    tenant_id=tid,
+                )
+
+            commit_verifier = verify_completion
         tool_names = (
             self._available_tool_names()
             if loop_policy.allowed_tools is None
             else list(loop_policy.allowed_tools)
         )
-        loop = AgentDriverLoop(self.kernel, policy=loop_policy, allowed_tools=tool_names)
+        loop = AgentDriverLoop(
+            self.kernel,
+            policy=loop_policy,
+            allowed_tools=tool_names,
+            commit_verifier=commit_verifier,
+        )
         effective_reflection_hook = reflection_hook
         if effective_reflection_hook is None:
             effective_reflection_hook = self._build_default_reflection_hook(tool_names)
@@ -333,9 +395,11 @@ class AssistantRuntime:
         return loop.run(
             initial_input,
             session_id=session_id,
-            tenant_id=str(getattr(getattr(self.kernel, "config", None), "tenant_id", "default") or "default"),
+            tenant_id=tenant_id,
             reflection_hook=effective_reflection_hook,
             observation_hook=effective_observation_hook,
+            initial_goal_blackboard=initial_goal_blackboard,
+            initial_tool_outcome_evidence=initial_tool_outcome_evidence,
         )
 
     def _build_default_reflection_hook(self, tool_names: list[str]) -> Any:

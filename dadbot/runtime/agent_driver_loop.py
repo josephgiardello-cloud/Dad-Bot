@@ -4,7 +4,12 @@ from collections.abc import Callable
 from dataclasses import dataclass, field
 from time import perf_counter
 from typing import TYPE_CHECKING, Any, Protocol, cast
+from uuid import uuid4
 
+from dadbot.core.agent_loop_progress import (
+    normalize_goal_blackboard,
+    normalize_tool_outcome_evidence,
+)
 from dadbot.core.execution_contract import SovereignContext, TurnDelivery, TurnResponse, live_turn_request
 from dadbot.runtime.structured_output import AgentPlan, SchemaValidationError, verify_agent_plan
 
@@ -18,6 +23,7 @@ class KernelTurnExecutor(Protocol):
 
 ReflectionHook = Callable[[dict[str, Any]], dict[str, Any]]
 ObservationHook = Callable[[dict[str, Any]], str]
+CanonicalCommitVerifier = Callable[[str, str, str], bool | dict[str, Any] | None]
 
 
 @dataclass(slots=True)
@@ -50,6 +56,7 @@ class DriverLoopResult:
     failures: int = 0
     consecutive_noop: int = 0
     goal_blackboard: dict[str, str] = field(default_factory=dict)
+    tool_outcome_evidence: dict[str, Any] = field(default_factory=dict)
     tenant_id: str = "default"
     session_id: str = "default"
 
@@ -59,6 +66,7 @@ class _LoopTurnContext:
     turn_index: int
     reflection_context: dict[str, Any]
     session_id: str
+    loop_run_id: str
     initial_observation: str
     last_reply: str
     last_action_input: str
@@ -78,6 +86,7 @@ class AgentDriverLoop:
         policy: DriverLoopPolicy | None = None,
         event_bus: EventBus | None = None,
         allowed_tools: list[str] | None = None,
+        commit_verifier: CanonicalCommitVerifier | None = None,
     ) -> None:
         self.kernel = kernel
         self.policy = policy or DriverLoopPolicy()
@@ -86,6 +95,48 @@ class AgentDriverLoop:
         selected_tools = policy_tools if allowed_tools is None else allowed_tools
         self._allowed_tools = None if selected_tools is None else list(selected_tools)
         self._trigger_type = str(self.policy.trigger_type or "interactive")
+        self._commit_verifier = commit_verifier
+
+    def _read_completion_evidence(
+        self,
+        request_id: str,
+        turn: _LoopTurnContext,
+        tenant_id: str,
+    ) -> dict[str, Any] | None:
+        if self._commit_verifier is None:
+            return normalize_tool_outcome_evidence(None)
+        completion = self._commit_verifier(request_id, turn.session_id, tenant_id)
+        if completion is None or completion is False:
+            return None
+        if completion is True:
+            return normalize_tool_outcome_evidence(None)
+        if type(completion) is not dict:
+            raise TypeError("Canonical completion lookup returned an unsupported value")
+        if (
+            completion.get("request_id") != request_id
+            or completion.get("session_id") != turn.session_id
+            or completion.get("tenant_id") != tenant_id
+            or type(completion.get("trace_id")) is not str
+            or not completion["trace_id"].strip()
+        ):
+            raise ValueError("Canonical completion metadata scope does not match the dispatched turn")
+        metadata = completion.get("metadata")
+        if type(metadata) is not dict:
+            raise ValueError("Canonical completion metadata is malformed")
+        loop_metadata = metadata.get("agent_loop")
+        if (
+            type(loop_metadata) is not dict
+            or type(loop_metadata.get("schema_version")) is not int
+            or loop_metadata["schema_version"] != 1
+            or loop_metadata.get("loop_run_id") != turn.loop_run_id
+            or type(loop_metadata.get("turn_index")) is not int
+            or loop_metadata.get("turn_index") != turn.turn_index
+        ):
+            raise ValueError("Canonical completion metadata does not match the dispatched loop turn")
+        return normalize_tool_outcome_evidence(
+            metadata.get("tool_outcome_evidence"),
+            expected_trace_id=completion["trace_id"],
+        )
 
     @staticmethod
     def _coerce_turn_result(response_obj: Any) -> tuple[str, bool]:
@@ -237,6 +288,7 @@ class AgentDriverLoop:
         tenant_id: str,
     ) -> tuple[str, str, bool]:
         started = perf_counter()
+        request_id = uuid4().hex
         try:
             response_obj = self.kernel.execute_turn(
                 live_turn_request(
@@ -245,11 +297,16 @@ class AgentDriverLoop:
                     context=SovereignContext(
                         session_id=turn.session_id,
                         tenant_id=tenant_id,
+                        request_id=request_id,
                     ),
                     metadata={
+                        "request_id": request_id,
                         "agent_loop": {
+                            "schema_version": 1,
+                            "loop_run_id": turn.loop_run_id,
                             "turn_index": turn.turn_index,
                             "goal_blackboard": dict(sorted(result.goal_blackboard.items())),
+                            "goal_updates": dict(turn.reflection.get("goal_updates") or {}),
                             "plan_verification": "passed",
                             "trigger_type": self._trigger_type,
                         },
@@ -257,48 +314,29 @@ class AgentDriverLoop:
                 ),
             )
             reply, should_end = self._coerce_turn_result(response_obj)
-            elapsed_ms = (perf_counter() - started) * 1000.0
-            result.records.append(
-                LoopTurnRecord(
-                    turn_index=turn.turn_index,
-                    observation=turn.observation,
-                    action_input=turn.action_input,
-                    reflection=turn.reflection,
-                    reply=reply,
-                    should_end=should_end,
-                    duration_ms=elapsed_ms,
-                    commit_status="committed",
-                ),
-            )
-            result.completed_turns += 1
-            if reply.strip():
-                result.consecutive_noop = 0
-            else:
-                result.consecutive_noop += 1
-            action_type = str(turn.reflection.get("action_type") or "kernel_turn").strip() or "kernel_turn"
-            self._emit(
-                "loop_turn_completed",
-                thread_id=turn.session_id,
-                payload={
-                    "turn_index": turn.turn_index,
-                    "action_type": action_type,
-                    "action_input": turn.action_input,
-                    "commit_status": "committed",
-                    "reply": reply,
-                    "should_end": should_end,
-                    "duration_ms": elapsed_ms,
-                    "consecutive_noop": result.consecutive_noop,
-                },
-            )
-            if should_end:
-                result.stop_reason = "kernel_should_end"
-                return reply, turn.action_input, True
-            if result.consecutive_noop >= int(self.policy.max_consecutive_noop):
-                result.stop_reason = "noop_threshold"
-                return reply, turn.action_input, True
-            return reply, turn.action_input, False
         except Exception as exc:  # noqa: BLE001
             elapsed_ms = (perf_counter() - started) * 1000.0
+            if self._commit_verifier is not None:
+                completed = self._read_completion_evidence(request_id, turn, tenant_id) is not None
+                result.records.append(
+                    LoopTurnRecord(
+                        turn_index=turn.turn_index,
+                        observation=turn.observation,
+                        action_input=turn.action_input,
+                        reflection=turn.reflection,
+                        reply="",
+                        should_end=False,
+                        duration_ms=elapsed_ms,
+                        commit_status="uncertain",
+                        error=(
+                            f"Canonical turn completed before the response failed: {exc}"
+                            if completed
+                            else f"Canonical completion could not be verified after the response failed: {exc}"
+                        ),
+                    ),
+                )
+                result.stop_reason = "commit_unverified"
+                return last_reply, last_action_input, True
             should_stop = self._record_failure(
                 result,
                 LoopTurnRecord(
@@ -314,6 +352,66 @@ class AgentDriverLoop:
                 ),
             )
             return last_reply, last_action_input, should_stop
+
+        elapsed_ms = (perf_counter() - started) * 1000.0
+        completion_evidence = self._read_completion_evidence(request_id, turn, tenant_id)
+        if completion_evidence is None:
+            result.records.append(
+                LoopTurnRecord(
+                    turn_index=turn.turn_index,
+                    observation=turn.observation,
+                    action_input=turn.action_input,
+                    reflection=turn.reflection,
+                    reply=reply,
+                    should_end=should_end,
+                    duration_ms=elapsed_ms,
+                    commit_status="uncertain",
+                    error="Canonical JOB_COMPLETED evidence is missing for the request",
+                ),
+            )
+            result.stop_reason = "commit_unverified"
+            return last_reply, last_action_input, True
+
+        result.tool_outcome_evidence = completion_evidence
+        result.records.append(
+            LoopTurnRecord(
+                turn_index=turn.turn_index,
+                observation=turn.observation,
+                action_input=turn.action_input,
+                reflection=turn.reflection,
+                reply=reply,
+                should_end=should_end,
+                duration_ms=elapsed_ms,
+                commit_status="committed",
+            ),
+        )
+        result.completed_turns += 1
+        if reply.strip():
+            result.consecutive_noop = 0
+        else:
+            result.consecutive_noop += 1
+        action_type = str(turn.reflection.get("action_type") or "kernel_turn").strip() or "kernel_turn"
+        self._emit(
+            "loop_turn_completed",
+            thread_id=turn.session_id,
+            payload={
+                "turn_index": turn.turn_index,
+                "action_type": action_type,
+                "action_input": turn.action_input,
+                "commit_status": "committed",
+                "reply": reply,
+                "should_end": should_end,
+                "duration_ms": elapsed_ms,
+                "consecutive_noop": result.consecutive_noop,
+            },
+        )
+        if should_end:
+            result.stop_reason = "kernel_should_end"
+            return reply, turn.action_input, True
+        if result.consecutive_noop >= int(self.policy.max_consecutive_noop):
+            result.stop_reason = "noop_threshold"
+            return reply, turn.action_input, True
+        return reply, turn.action_input, False
 
     @staticmethod
     def _build_observation(
@@ -339,8 +437,16 @@ class AgentDriverLoop:
         tenant_id: str = "default",
         reflection_hook: ReflectionHook | None = None,
         observation_hook: ObservationHook | None = None,
+        initial_goal_blackboard: dict[str, str] | None = None,
+        initial_tool_outcome_evidence: dict[str, Any] | None = None,
     ) -> DriverLoopResult:
-        result = DriverLoopResult(tenant_id=str(tenant_id or "default"), session_id=str(session_id or "default"))
+        result = DriverLoopResult(
+            goal_blackboard=normalize_goal_blackboard(initial_goal_blackboard or {}),
+            tool_outcome_evidence=normalize_tool_outcome_evidence(initial_tool_outcome_evidence),
+            tenant_id=str(tenant_id or "default"),
+            session_id=str(session_id or "default"),
+        )
+        loop_run_id = uuid4().hex
         last_reply = ""
         last_action_input = str(initial_observation or "")
         pending_system_observation = ""
@@ -366,11 +472,13 @@ class AgentDriverLoop:
                 "records": list(result.records),
                 "system_observation": pending_system_observation,
                 "goal_blackboard": dict(result.goal_blackboard),
+                "tool_outcome_evidence": result.tool_outcome_evidence,
             }
             turn = _LoopTurnContext(
                 turn_index=turn_index,
                 reflection_context=ctx_payload,
                 session_id=normalized_session_id,
+                loop_run_id=loop_run_id,
                 initial_observation=str(initial_observation or ""),
                 last_reply=last_reply,
                 last_action_input=last_action_input,
@@ -387,8 +495,7 @@ class AgentDriverLoop:
                 pending_system_observation = retry_observation
                 continue
 
-            result.goal_blackboard.update(plan.goal_updates)
-
+            record_count = len(result.records)
             last_reply, last_action_input, should_stop = self._dispatch_plan(
                 result,
                 turn,
@@ -396,6 +503,11 @@ class AgentDriverLoop:
                 last_action_input=last_action_input,
                 tenant_id=str(tenant_id or "default"),
             )
+            if (
+                len(result.records) > record_count
+                and result.records[-1].commit_status == "committed"
+            ):
+                result.goal_blackboard.update(plan.goal_updates)
             if should_stop:
                 break
         else:

@@ -15,6 +15,8 @@ from typing import Any
 
 from pydantic import BaseModel, Field, StrictBool, StrictStr, ValidationError, field_validator
 
+from dadbot.core.agent_loop_progress import normalize_goal_updates
+
 # ---------------------------------------------------------------------------
 # Plan schema — what the LLM must return for each reflection step
 # ---------------------------------------------------------------------------
@@ -71,18 +73,7 @@ class AgentPlan(BaseModel):
     @field_validator("goal_updates")
     @classmethod
     def validate_goal_updates(cls, updates: dict[str, str]) -> dict[str, str]:
-        normalized: dict[str, str] = {}
-        for key, value in updates.items():
-            clean_key = key.strip()
-            clean_value = value.strip()
-            if not clean_key or len(clean_key) > 80:
-                raise ValueError("goal update keys must contain 1 to 80 non-whitespace characters")
-            if not clean_value or len(clean_value) > 300:
-                raise ValueError("goal update values must contain 1 to 300 non-whitespace characters")
-            if clean_key in normalized:
-                raise ValueError("goal update keys must be unique after trimming")
-            normalized[clean_key] = clean_value
-        return {key: normalized[key] for key in sorted(normalized)}
+        return normalize_goal_updates(updates)
 
 
 # ---------------------------------------------------------------------------
@@ -171,6 +162,8 @@ The canonical kernel owns tool planning, authorization, execution, and commit;
 tool_calls are advisory and do not execute by themselves. Update the goal
 blackboard only with concise facts supported by the current context. Do not
 include private chain-of-thought; reasoning should be a short decision summary.
+Treat hash-only tool outcome evidence as an observation, not proof of a goal
+postcondition or authorization to perform a follow-up action.
 Treat memory conflict and timestamp signals as evidence to check, not settled
 truth. Surface unresolved conflicts and use dates to qualify recency.
 
@@ -204,6 +197,7 @@ def build_reflection_prompt(
             "initial_observation": ctx.get("initial_observation", ""),
             "last_reply": ctx.get("last_reply", ""),
             "goal_blackboard": ctx.get("goal_blackboard", {}),
+            "tool_outcome_evidence": ctx.get("tool_outcome_evidence", {}),
             "memory_signals": ctx.get("memory_signals", {}),
             "completed_turns": len(ctx.get("records", [])),
         },

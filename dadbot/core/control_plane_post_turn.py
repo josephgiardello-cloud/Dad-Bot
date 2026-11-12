@@ -3,6 +3,11 @@ from __future__ import annotations
 import contextlib
 from typing import Any
 
+from dadbot.core.agent_loop_progress import (
+    AgentLoopCommitIdentity,
+    apply_committed_agent_loop_progress,
+)
+
 
 def _apply_submit_success_postprocessing_impl(
     control_plane: Any,
@@ -14,12 +19,24 @@ def _apply_submit_success_postprocessing_impl(
     loop_iterations: int,
 ) -> tuple[Any, Any]:
     response_text = str(result[0] if isinstance(result, tuple) and len(result) >= 1 else "")
+    tenant_id = str(job.tenant_id or "")
+    session = control_plane.registry.get_or_create(session_key, tenant_id=tenant_id)
     control_plane._promote_semantic_memory(
-        session=control_plane.registry.get_or_create(session_key),
+        session=session,
         job=job,
         response_text=response_text,
     )
-    session_state = dict(control_plane.registry.get_or_create(session_key).get("state") or {})
+    session_state = dict(session.get("state") or {})
+    apply_committed_agent_loop_progress(
+        session_state,
+        metadata=dict(job.metadata or {}),
+        identity=AgentLoopCommitIdentity(
+            tenant_id=tenant_id,
+            session_id=session_key,
+            trace_id=str(trace_token or ""),
+            job_id=str(job.job_id or ""),
+        ),
+    )
     runtime_plan = dict(job.metadata.get("runtime_plan") or {})
     control_plane._semantic_memory_graph.update_from_turn(
         state=session_state,
@@ -127,6 +144,7 @@ def _apply_submit_success_postprocessing_impl(
         session_id=session_key,
         state_patch=session_state,
         trace_token=str(trace_token or ""),
+        tenant_id=tenant_id,
     )
     control_plane._emit_runtime_stream_event(
         event_type="partial.output",

@@ -287,6 +287,16 @@ class TestExecuteToolRecording:
         assert len(actions[0]["input_hash"]) == 64
         assert len(actions[0]["output_hash"]) == 64
         assert "Private reminder" not in str(actions)
+        assert CoreOrchestrator._tool_action_audit_from_context(ctx, trace_id="other-trace") == []
+
+        invalid_context = MockTurnContext(state={"sovereign_events": [dict(ctx.state["sovereign_events"][0])]})
+        invalid_context.state["sovereign_events"][0]["checksum"] = "invalid"
+        with pytest.raises(RuntimeError, match="invalid event stream"):
+            CoreOrchestrator._tool_action_audit_from_context(
+                invalid_context,
+                trace_id=ctx.trace_id,
+                strict=True,
+            )
 
     def test_idempotent_calls_both_recorded(self) -> None:
         """Both successful and cached executions are recorded."""

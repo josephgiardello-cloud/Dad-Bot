@@ -74,6 +74,14 @@ class SideEffectAdapter:
         from dadbot.core.execution_receipt import ReceiptChain
 
         chain = ReceiptChain.from_state(context.state)
+        if len(chain) >= 64:
+            raise ValueError("Execution receipt chain exceeds the 64-receipt limit")
+        violations = chain.verify_continuity(
+            signer,
+            expected_turn_id=str(context.trace_id or ""),
+        )
+        if violations:
+            raise ValueError("Existing execution receipt chain is invalid for this turn")
         receipt = signer.sign(
             turn_id=str(context.trace_id or ""),
             stage=stage_name,

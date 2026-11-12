@@ -695,10 +695,78 @@ def test_hot_path_index_does_not_copy_checkpoint_payloads_and_preserves_trace_ro
     assert len(snapshots) == 1
     monkeypatch.setattr(execution_ledger, "_copy_ledger_value", original_copy)
     ledger.write({
-        **_session_event(3), "type": "JOB_COMPLETED", "payload": {"request_id": "request", "result": ["ok", False]},
+        **_session_event(3),
+        "type": "JOB_COMPLETED",
+        "payload": {
+            "job_id": "job",
+            "request_id": "request",
+            "result": ["ok", False],
+            "metadata": {
+                "agent_loop": {"schema_version": 1, "goal_updates": {}},
+                "tool_outcome_evidence": {"trace_id": "trace", "outcomes": []},
+                "execution_receipt_status": "verified",
+                "execution_receipt_evidence": {
+                    "schema_version": 1,
+                    "trace_id": "trace",
+                    "key_id": "0123456789abcdef",
+                    "stages": ["save"],
+                    "receipts": [{"stage": "save"}],
+                },
+            },
+        },
     })
     assert not index.has_ambiguous_request_inflight(session_id="test", request_id="request")
     assert index.completed_result(session_id="test", request_id="request") == ("ok", False)
+    assert index.completed_metadata(session_id="test", request_id="request") == {
+        "tenant_id": "",
+        "session_id": "test",
+        "request_id": "request",
+        "job_id": "job",
+        "trace_id": "trace",
+        "metadata": {
+            "agent_loop": {"schema_version": 1, "goal_updates": {}},
+            "tool_outcome_evidence": {"trace_id": "trace", "outcomes": []},
+            "execution_receipt_status": "verified",
+            "execution_receipt_evidence": {
+                "schema_version": 1,
+                "trace_id": "trace",
+                "key_id": "0123456789abcdef",
+                "stages": ["save"],
+                "receipts": [{"stage": "save"}],
+            },
+        },
+    }
+    assert index.completed_agent_loop_entries(session_id="test") == [
+        {
+            "tenant_id": "",
+            "session_id": "test",
+            "request_id": "request",
+            "job_id": "job",
+            "trace_id": "trace",
+            "metadata": {
+                "agent_loop": {"schema_version": 1, "goal_updates": {}},
+                "tool_outcome_evidence": {"trace_id": "trace", "outcomes": []},
+                "execution_receipt_status": "verified",
+                "execution_receipt_evidence": {
+                    "schema_version": 1,
+                    "trace_id": "trace",
+                    "key_id": "0123456789abcdef",
+                    "stages": ["save"],
+                    "receipts": [{"stage": "save"}],
+                },
+            },
+        },
+    ]
+    assert index.completed_metadata(
+        session_id="test",
+        request_id="request",
+        tenant_id="other-tenant",
+    ) is None
+    assert index.completed_metadata(
+        session_id="other-session",
+        request_id="request",
+        tenant_id="",
+    ) is None
     assert index.trace_root("trace") == root["event_id"]
 
 

@@ -362,7 +362,12 @@ Local-WAL graph refresh reads committed tenant sources even when runtime state h
 	- `OLLAMA_HOST`
 	- `DADBOT_LLM_MODEL`
 	- `POSTGRES_PASSWORD` (if using postgres-backed flows)
-3. Keep `.env` local and uncommitted
+3. Optionally set `DADBOT_RECEIPT_KEY` to a cryptographically random value of at
+   least 32 bytes, consistently across processes, to enable signed stage receipts
+   in agent-loop completion metadata. If absent or too short, turns continue
+   normally but durable receipts are reported unavailable. Keep the key secret;
+   key rotation/reconciliation of older receipts is not yet supported.
+4. Keep `.env` local and uncommitted
 
 The install script will guide you through the rest.
 

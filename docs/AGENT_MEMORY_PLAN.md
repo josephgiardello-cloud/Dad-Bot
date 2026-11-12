@@ -1,7 +1,10 @@
 # Agent and Memory Hardening Plan
 
 Date: 2026-11-11  
-Status: Milestone 0 verified for the default local suite; milestone 1 is in progress.
+Status: Milestone 0 is complete for the default local suite; milestone 1 is in
+progress. Goal proposals now affect loop progress only after a committed turn;
+safe partial-loop recovery, canonical receipt reconciliation, and non-SQLite
+backend certification remain open.
 
 ## Goal
 
@@ -17,7 +20,7 @@ memory, temporal, and autonomy work.
 
 | Area | Current evidence | Remaining work |
 | --- | --- | --- |
-| Driver Loop | Bounded turns, structured reflection, plan validation, goal-board metadata, and canonical dispatch exist in [AgentDriverLoop](../dadbot/runtime/agent_driver_loop.py). | Verify actual outcome and commit status; recover committed goal state across runs; distinguish proposals from committed progress. |
+| Driver Loop | Bounded turns, structured reflection, plan validation, canonical request/run identities, and scoped completion verification exist in [AgentDriverLoop](../dadbot/runtime/agent_driver_loop.py). Successful post-turn processing persists a bounded goal board and hash-only tool outcome summaries through session state; [AssistantRuntime](../dadbot/assistant_runtime.py) restores them with tenant/session checks and reconciles a safe missing-progress tail from canonical completions. The graph emits and verifies bounded HMAC stage receipts when a stable key is configured, then attaches them to canonical completion metadata. | Verify goal postconditions; support safe partial-loop recovery without replaying uncertain actions. |
 | Memory-first observation | [AssistantRuntime](../dadbot/assistant_runtime.py) enables memory observation by default for `run_agent_loop`. Its provider calls `relevant_memories_for_input`. | Certify every supported loop ingress and measure retrieval quality. Use the richer graph/semantic/consolidated/archive bundle where appropriate rather than assuming the current provider covers all sources. |
 | Online consolidation | [PersistenceService](../dadbot/services/persistence.py) publishes post-commit readiness; [PostCommitWorker](../dadbot/services/post_commit_worker.py) invokes consolidation. | Durable scheduling, authority propagation, idempotency, meaningful success reporting, and recovery after process loss. |
 | Durable memory authority | [MemoryStorageBackend](../dadbot/memory/storage.py) authorizes memory access, fences local index writes, and records tenant-specific projection status in the ledger. | Certify completeness across bridge, worker, snapshot, and supported adapter paths; metadata is not absent, but coverage must be proven. |
@@ -198,7 +201,7 @@ loop-resume tests rather than duplicating their coverage.
 | Loop observation | Tenant-bound provider, committed memory/insight catalogs, verified semantic read fence | Implemented; does not publish access updates or schedule index repair |
 | Explicit semantic repair | Committed catalog and existing tenant revision/publication fences | Implemented; empty catalogs clear obsolete rows; failures propagate |
 | Ledger recall fallback | Live authority and canonical tenant/session filtering before the event limit | Implemented |
-| Projection recovery | Versioned ledger-backed status and tenant-qualified SQLite indexes | Local publication ordering covered; adapter and multi-process rebuild certification remain open |
+| Projection recovery | Versioned ledger-backed status and tenant-qualified SQLite indexes | File-WAL/SQLite concurrent graph and semantic rebuilds exercised in separate processes; non-SQLite adapter certification remains open |
 | Loop snapshots | Tenant/session-hashed paths, exact payload ownership, live authority, atomic publication | Diagnostic snapshots hardened; canonical receipt reconciliation and production resume wiring remain open |
 | Executive startup tasks | Tenant-qualified Markdown boards, owner headers, live authority, and fenced atomic updates | Implemented; unowned legacy tasks are preserved but excluded |
 
@@ -252,11 +255,20 @@ local diagnostics, not receipt-backed proof: they cannot authorize skipping or
 resending actions. `AgentDriverLoop.run()` has no snapshot-resume API, and
 AssistantRuntime does not wire this standalone manager into production recovery.
 
+Validated goal updates are now applied to the in-memory goal blackboard only
+after a dispatch returns committed. A failed dispatch cannot make its proposal
+appear as progress to later reflections. This does not persist or recover goal
+state across runs.
+
 Snapshot repair validation: **151 passed, zero skips** across snapshot lifecycle,
 driver, memory bridge, authority, tenant isolation, and architecture tests.
 Coverage includes fresh-process reload, corruption preservation, publication
 failure, session-name collisions, and revocation. No new changed-file lint or
 Pylance error diagnostics; the full suite was not rerun.
+
+Goal progress repair validation: **36 passed, zero failures** across the driver
+loop and snapshot regression modules. This is targeted evidence, not a new
+full-suite result.
 
 Projection recovery retains `PROJECTION_STATUS_UPDATED` as its status authority.
 Metadata version 1 records the attempted committed source revision, last
@@ -285,11 +297,21 @@ known successful applied revisions on failure, and excludes reports older than
 the known applied revision from the current status. Superseded attempts remain
 in the audit history. Existing WAL/revision fences still guard index writes.
 
+Two independent processes now have a regression test for simultaneous stale
+projection-status publication: both events must commit with distinct ledger
+sequences and the replayed status must reflect the latest sequence. This
+validates cross-process status append/retry, not concurrent physical index
+rebuilds or non-SQLite adapters; those remain open.
+
 Concurrent-publication validation: **208 passed, zero skips**, including
 overlapping rebuilds, independent ledger writers, late failures, and the existing
 stale-index/crash-recovery cases. Scale gates passed at 102.80 s / 120 s,
 20.80 s / 60 s, and 8.77 s / 30 s. No new lint diagnostics. Full-suite,
 multi-process rebuild, and non-SQLite adapter certification remain separate.
+
+Cross-process status-publication validation: **1 passed** with two synchronized
+processes starting from the same ledger head. The broader projection suite was
+not rerun for this addition.
 
 ## 2. Certify memory-first observation
 
@@ -333,21 +355,51 @@ must be measured; merely checking that the provider was called is insufficient.
 ### Work
 
 - Keep structured reflection and the existing pre-dispatch plan gate.
-- Obtain completion evidence from the canonical response/receipt contract.
-  `_dispatch_plan` currently labels any normally returned response as committed;
-  test error-shaped responses and publication failure before changing that logic.
-- Separate proposed goal updates from committed goal progress. `run` currently
-  updates its in-memory board before dispatch; failed work must not appear as
-  completed progress.
-- Persist and recover goal identity, accepted progress, unresolved blockers,
-  next step, and revision through the existing canonical state/ledger path.
-  Keep the schema bounded; do not create a second world-model database.
+- Each dispatch now carries a unique request ID and loop-run ID. When the
+  production control plane is available, count a normal response as committed
+  only after the tenant/session/request-scoped `LedgerIndex` confirms
+  `JOB_COMPLETED`; missing evidence and dispatch exceptions stop as uncertain.
+- Goal proposals now update in-memory progress only after verified completion.
+  The successful post-turn path persists a bounded, versioned board plus its
+  tenant/session/trace/job/request/run/turn identity in canonical session state.
+  `AssistantRuntime` restores only state matching the active tenant and session.
+- The persisted schema covers the accepted goal board and last commit identity,
+  not unresolved blockers or a resumable execution cursor. It is not a second
+  world-model database and does not authorize replay or resend.
+- Agent-loop completion metadata now carries at most 16 hash/status/tool identity
+  summaries from checksum-validated tool events for the current trace. The
+  canonical `JOB_COMPLETED` lookup feeds them into the next reflection as
+  observations; raw tool inputs/outputs are excluded, and these summaries are
+  explicitly not proof of goal postconditions.
+- On startup, recover missing goal progress only from tenant/session-scoped
+  canonical `JOB_COMPLETED` metadata after the persisted request marker. Each
+  recovered completion must carry the same pre-dispatch goal-board snapshot as
+  the current projection; stale or ambiguous tails fail explicitly. Recovery
+  commits the reconstructed progress through `SESSION_STATE_UPDATED` and never
+  redispatches the completed action.
 - Add outcome verification based on tool receipts and required postconditions.
   Use an optional critic only for ambiguity that deterministic checks cannot
   settle. Its assessment is not execution authority.
-- Feed observed outcomes and consolidation status into the next reflection.
-  Use bounded retry/escalation policies that distinguish definitely-undispatched
+- The canonical graph now emits receipts after successful, non-skipped stages
+  and their after-checkpoints, verifies turn scope, order, HMAC signatures, and
+  chain continuity, and stores a bounded envelope in `JOB_COMPLETED` metadata
+  for agent-loop turns. This path is enabled only with a configured key of at
+  least 32 bytes; the default process-random signer is explicitly unavailable
+  for durable evidence.
+- Receipts establish signed stage/checkpoint-chain evidence, not goal
+  postcondition success. Partial-loop resume, receipt-backed outcome
+  reconciliation, and key rotation remain open.
+- Use bounded retry/escalation policies that distinguish definitely-undispatched
   work from uncertain external effects.
+- Feed observed outcomes and consolidation status into the next reflection;
+  receipt-backed outcome verification remains open.
+- Focused loop, progress-state, structured-output, facade, ledger-index,
+  tool-recording, recovery, and receipt tests passed with isolated pytest
+  temporary storage. Targeted Ruff checks and `git diff --check` passed; the
+  broader lint selection still reports existing diagnostics in legacy files.
+  The full suite was not rerun for this change; deterministic postcondition
+  checks, partial-loop recovery, and supported adapter certification remain
+  open.
 
 ### Execution boundary
 
@@ -527,5 +579,9 @@ Not included: kernel rewrites, a new agent framework, wholesale memory-store
 replacement, unbounded autonomy, policy self-modification, or claims of parity
 with another product without a shared benchmark.
 
-Current execution step: milestone 0. The validated fixture correction is
-published; diagnosis of the remaining broad-suite failures is in progress.
+Current execution step: milestone 1 remains open, with the first canonical
+goal-state recovery path implemented. Next, reconcile tool receipts and
+postconditions, add safe recovery for interrupted loops, and certify
+non-SQLite adapters. A synchronized File-WAL/SQLite multi-process rebuild
+scenario is now covered; standalone loop snapshots remain diagnostics, not
+replay authority.

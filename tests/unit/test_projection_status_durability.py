@@ -1,3 +1,6 @@
+import subprocess
+import sys
+import time
 from types import SimpleNamespace
 
 import pytest
@@ -195,6 +198,168 @@ def test_independent_status_writer_reallocates_generation_after_head_conflict(ma
     restored = _reload_projection_status(bot)["semantic"]
     assert restored["status"] == "degraded"
     assert restored["generation"] > published["generation"]
+
+
+def test_process_writers_reallocate_projection_generation_after_head_conflict(
+    make_test_dadbot, monkeypatch,
+):
+    monkeypatch.setenv("DADBOT_DURABLE_EXECUTION_LEDGER", "1")
+    bot = make_test_dadbot()
+    session_dir = bot.config.session_log_dir
+    tenant_id = bot.config.tenant_id
+    baseline_events = len(bot._execution_ledger.read())
+    worker = """
+import sys
+import time
+from pathlib import Path
+from types import SimpleNamespace
+from dadbot.core.execution_ledger import ExecutionLedger
+from dadbot.core.ledger_backend import FileWALLedgerBackend
+from dadbot.memory.storage import MemoryStorageBackend
+root = Path(sys.argv[1])
+tenant_id = sys.argv[2]
+writer_id = sys.argv[3]
+ledger = ExecutionLedger(FileWALLedgerBackend(root / "execution_ledger.jsonl"))
+ledger.load_from_backend()
+storage = MemoryStorageBackend(
+    SimpleNamespace(config=SimpleNamespace(tenant_id=tenant_id), _execution_ledger=ledger),
+    SimpleNamespace(),
+)
+status = storage._load_projection_recovery_status()["semantic"]
+(root / (".projection-writer-" + writer_id + "-ready")).write_text("ready", encoding="utf-8")
+while not (root / ".projection-writer-release").exists():
+    time.sleep(0.01)
+storage._persist_projection_recovery_status(
+    "semantic",
+    {**status, "status": "degraded", "error": "Concurrent process publication", "updated_at": time.time()},
+)
+"""
+    writers = []
+    release = session_dir / ".projection-writer-release"
+    try:
+        for index in range(2):
+            writers.append(subprocess.Popen(
+                [sys.executable, "-c", worker, str(session_dir), tenant_id, str(index)],
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+                text=True,
+            ))
+        deadline = time.monotonic() + 30
+        ready = [session_dir / f".projection-writer-{index}-ready" for index in range(2)]
+        while not all(path.exists() for path in ready):
+            exited = [writer for writer in writers if writer.poll() is not None]
+            if exited:
+                details = [writer.communicate() for writer in exited]
+                raise AssertionError(f"Projection writer exited before synchronization: {details}")
+            if time.monotonic() >= deadline:
+                raise TimeoutError("Projection writer processes did not reach the barrier")
+            time.sleep(0.01)
+        release.write_text("release", encoding="utf-8")
+        for writer in writers:
+            stdout, stderr = writer.communicate(timeout=30)
+            assert writer.returncode == 0, f"Projection writer failed: {stdout}\n{stderr}"
+    finally:
+        release.write_text("release", encoding="utf-8")
+        for writer in writers:
+            if writer.poll() is None:
+                writer.kill()
+                writer.communicate(timeout=10)
+
+    events = ExecutionLedger(
+        FileWALLedgerBackend(session_dir / "execution_ledger.jsonl")
+    )
+    events.load_from_backend()
+    appended = [
+        event for event in events.read()[baseline_events:]
+        if event.get("type") == "PROJECTION_STATUS_UPDATED"
+        and event.get("payload", {}).get("tenant_id") == tenant_id
+        and event.get("payload", {}).get("projection") == "semantic"
+    ]
+    assert len(appended) == 2
+    assert len({event["sequence"] for event in appended}) == 2
+    restored = _reload_projection_status(bot)["semantic"]
+    assert restored["status"] == "degraded"
+    assert restored["generation"] == max(event["sequence"] for event in appended)
+
+
+def test_process_projection_rebuilds_share_local_index_writes(make_test_dadbot, monkeypatch):
+    monkeypatch.setenv("DADBOT_DURABLE_EXECUTION_LEDGER", "1")
+    bot = make_test_dadbot()
+    bot.mutate_memory_store(memories=[{
+        "id": "process-rebuild",
+        "summary": "Committed memory for concurrent projection recovery",
+    }])
+    graph_backend = bot.memory_manager.graph_manager._graph_store_backend
+    graph_backend.replace_graph(
+        [{"node_key": "stale", "node_type": "topic", "label": "obsolete"}],
+        [],
+    )
+    session_dir = bot.config.session_log_dir
+    worker = """
+import sys
+import time
+from pathlib import Path
+from dadbot.core.dadbot import DadBot
+from dadbot.memory.semantic_manager import SemanticIndexManager
+
+SemanticIndexManager.embed_texts = lambda self, texts, purpose=None: [[1.0] * 12 for _ in texts]
+root = Path(sys.argv[1])
+worker_id = sys.argv[2]
+bot = DadBot()
+graph = bot.memory_manager.graph_manager
+original = graph.sync_graph_store
+(root / (".projection-rebuild-" + worker_id + "-ready")).write_text("ready", encoding="utf-8")
+def synchronized_sync(*, turn_context=None):
+    (root / (".projection-rebuild-" + worker_id + "-entered")).write_text("entered", encoding="utf-8")
+    deadline = time.monotonic() + 60
+    while not all((root / (".projection-rebuild-" + peer + "-entered")).exists() for peer in ("0", "1")):
+        if time.monotonic() >= deadline:
+            raise TimeoutError("Concurrent projection rebuild did not reach the barrier")
+        time.sleep(0.01)
+    return original(turn_context=turn_context)
+graph.sync_graph_store = synchronized_sync
+try:
+    bot.memory_manager._storage.recover_local_projections()
+finally:
+    bot.shutdown()
+"""
+    workers = []
+    try:
+        for worker_id in ("0", "1"):
+            workers.append(subprocess.Popen(
+                [sys.executable, "-c", worker, str(session_dir), worker_id],
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+                text=True,
+            ))
+        ready = [session_dir / f".projection-rebuild-{worker_id}-ready" for worker_id in ("0", "1")]
+        deadline = time.monotonic() + 60
+        while not all(path.exists() for path in ready):
+            exited = [process for process in workers if process.poll() is not None]
+            if exited:
+                details = [process.communicate() for process in exited]
+                raise AssertionError(f"Projection rebuild process exited before the barrier: {details}")
+            if time.monotonic() >= deadline:
+                raise TimeoutError("Projection rebuild processes did not reach the barrier")
+            time.sleep(0.01)
+        for process in workers:
+            stdout, stderr = process.communicate(timeout=90)
+            assert process.returncode == 0, f"Projection rebuild failed: {stdout}\n{stderr}"
+    finally:
+        for process in workers:
+            if process.poll() is None:
+                process.kill()
+                process.communicate(timeout=10)
+
+    graph = graph_backend.fetch_graph()
+    assert not any(node["node_key"] == "stale" for node in graph["nodes"])
+    assert bot.memory_manager._semantic_manager._semantic_index_backend.existing_content_hashes()
+    status = _reload_projection_status(bot)
+    assert all(status[name]["status"] == "sync_succeeded" for name in ("graph", "semantic"))
+    assert all(
+        status[name]["applied_revision"] == status[name]["source_revision"]
+        for name in ("graph", "semantic")
+    )
 
 
 @pytest.mark.parametrize("same_source", [False, True])
