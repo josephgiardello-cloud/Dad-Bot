@@ -174,7 +174,7 @@ loop-resume tests rather than duplicating their coverage.
 | Loop observation | Tenant-bound provider, committed memory/insight catalogs, verified semantic read fence | Implemented; does not publish access updates or schedule index repair |
 | Explicit semantic repair | Committed catalog and existing tenant revision/publication fences | Implemented; empty catalogs clear obsolete rows; failures propagate |
 | Ledger recall fallback | Live authority and canonical tenant/session filtering before the event limit | Implemented |
-| Projection recovery | Existing ledger-backed projection status and tenant-qualified indexes | Existing coverage retained; metadata completeness and adapter certification remain open |
+| Projection recovery | Versioned ledger-backed status and tenant-qualified SQLite indexes | Source/applied revisions and failure recovery covered; adapter and concurrent-rebuild certification remain open |
 | Loop snapshots | Tenant/session-hashed paths, exact payload ownership, live authority, atomic publication | Diagnostic snapshots hardened; canonical receipt reconciliation and production resume wiring remain open |
 | Executive startup tasks | Tenant-qualified Markdown boards, owner headers, live authority, and fenced atomic updates | Implemented; unowned legacy tasks are preserved but excluded |
 
@@ -233,6 +233,25 @@ driver, memory bridge, authority, tenant isolation, and architecture tests.
 Coverage includes fresh-process reload, corruption preservation, publication
 failure, session-name collisions, and revocation. No new changed-file lint or
 Pylance error diagnostics; the full suite was not rerun.
+
+Projection recovery retains `PROJECTION_STATUS_UPDATED` as its status authority.
+Metadata version 1 records the attempted committed source revision, last
+successfully applied revision, required revision, generation, dirty flag, and
+rebuild reason. A failed attempt does not advance the applied revision.
+Semantic recovery uses the committed catalog, not staged Observation state.
+Authority failures propagate rather than being recorded as backend degradation;
+status reads and publication revalidate live tenant authority.
+
+Legacy successful statuses infer an applied revision from their source; legacy
+failures leave it unknown. Invalid or future-revision metadata fails explicitly
+without rewriting ledger history. Metadata versioning does not certify every
+adapter's physical index schema or serialize concurrent rebuild generations.
+
+Projection repair validation: **202 passed, zero skips** across recovery,
+process-termination, authority, isolation, and architecture tests. The unchanged
+scale deadlines passed at 112.18 s / 120 s, 20.62 s / 60 s, and 8.96 s / 30 s.
+No new lint diagnostics; existing lint/type debt remains. This is targeted
+evidence, not a new full-suite result. Milestone 1 remains open.
 
 ## 2. Certify memory-first observation
 

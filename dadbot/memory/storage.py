@@ -11,6 +11,7 @@ from __future__ import annotations
 
 import json
 import logging
+import math
 import sqlite3
 import time
 import uuid
@@ -109,6 +110,54 @@ def _required_projection_revisions(events: list[dict], tenant_id: str) -> dict[s
                     required[name] = payload["revision"]
         previous = state
     return required
+
+
+def _projection_status_metadata(status: dict, *, current_revision: int | None = None) -> dict:
+    status = deepcopy(status)
+    version = status.get("schema_version", 0)
+    if type(version) is not int or version not in {0, 1}:
+        raise ValueError("Unsupported projection status schema version")
+    if version == 1 and not {
+        "source_revision", "applied_revision", "required_revision", "dirty", "rebuild_reason",
+    }.issubset(status):
+        raise ValueError("Incomplete projection status metadata")
+    generation = status.get("generation")
+    if (
+        status.get("status") not in {"sync_succeeded", "degraded", "dirty"}
+        or type(generation) is not int or generation < 0
+    ):
+        raise ValueError("Invalid projection recovery status or generation")
+    updated_at = status.get("updated_at")
+    if (
+        not isinstance(updated_at, (int, float)) or isinstance(updated_at, bool)
+        or not math.isfinite(updated_at) or updated_at < 0
+    ):
+        raise ValueError("Invalid projection recovery timestamp")
+    source = status.get("source_revision")
+    status.setdefault("applied_revision", source if status["status"] == "sync_succeeded" else None)
+    status.setdefault("required_revision", source)
+    for name in ("source_revision", "applied_revision", "required_revision"):
+        revision = status.get(name)
+        if (
+            (version == 1 and name != "applied_revision" and revision is None)
+            or (revision is not None and (
+                type(revision) is not int or revision < 1
+                or (current_revision is not None and revision > current_revision)
+            ))
+        ):
+            raise ValueError(f"Invalid projection {name}")
+    if status["status"] == "sync_succeeded" and (source is None or status["applied_revision"] != source):
+        raise ValueError("Successful projection status requires an applied source revision")
+    if "dirty" in status and type(status["dirty"]) is not bool:
+        raise ValueError("Invalid projection dirty flag")
+    status.setdefault("rebuild_reason", "legacy")
+    if not isinstance(status["rebuild_reason"], str) or not status["rebuild_reason"].strip():
+        raise ValueError("Invalid projection rebuild reason")
+    status["schema_version"] = version
+    status["dirty"] = status["status"] != "sync_succeeded" or (
+        (status["applied_revision"] or 0) < (status["required_revision"] or 0)
+    )
+    return status
 
 
 class _MemoryStoreParticipant:
@@ -227,55 +276,77 @@ class MemoryStorageBackend:
         backend = getattr(ledger, "_backend", None)
         return backend if isinstance(backend, FileWALLedgerBackend) else None
 
-    def recover_local_projections(self):
+    def recover_local_projections(self, *, reason: str = "recovery"):
         """Attempt each rebuild independently; the ledger remains authoritative."""
         self._authorize_tenant_memory()
         from dadbot.core.ledger_backend import WALCorruptionError
         from dadbot.core.tenant_memory_ledger import TenantMemoryLedgerCorruption, TenantMemoryRevisionConflict
+        from dadbot_system.delegation import AuthorityUnavailableError
+        from dadbot_system.security import AuthorizationError
 
         if self._local_authority_backend() is None:
             return
+        if not isinstance(reason, str) or not reason.strip():
+            raise ValueError("Projection recovery requires a rebuild reason")
         graph = self._manager.graph_manager
         self._projection_recovery_status = self._load_projection_recovery_status()
-        repairs = (
-            ("graph", lambda: (graph.invalidate_projection_cache(), graph.sync_graph_store(turn_context=None))),
-            ("semantic", lambda: self._manager.sync_semantic_memory_index(
-                list(self._manager.memory_projection().get("memories") or []),
-            )),
-        )
-        for name, repair in repairs:
+        for name in ("graph", "semantic"):
+            committed = self._committed_tenant_snapshot()
+            if committed is None:
+                raise RuntimeError("Projection recovery requires committed tenant memory")
+            source_revision, projection = committed
             previous = self._projection_recovery_status.get(name, {})
             generation = int(previous.get("generation") or 0) + 1
+            status = {
+                "schema_version": 1,
+                "generation": generation,
+                "source_revision": source_revision,
+                "applied_revision": previous.get("applied_revision"),
+                "required_revision": source_revision,
+                "rebuild_reason": reason,
+            }
             try:
-                repair()
-            except (WALCorruptionError, TenantMemoryLedgerCorruption, TenantMemoryRevisionConflict):
+                if name == "graph":
+                    graph.invalidate_projection_cache()
+                    graph.sync_graph_store(turn_context=None)
+                else:
+                    self._manager.sync_semantic_memory_index(list(projection.get("memories") or []))
+            except (
+                AuthorizationError, AuthorityUnavailableError,
+                WALCorruptionError, TenantMemoryLedgerCorruption, TenantMemoryRevisionConflict,
+            ):
                 raise
             except (OSError, sqlite3.Error, RuntimeError) as exc:
                 logger.warning("%s projection recovery failed: %s", name, exc, exc_info=True)
-                status = {
+                status.update({
                     "status": "degraded",
-                    "generation": generation,
-                    "source_revision": self._tenant_base_revision,
+                    "dirty": True,
                     "updated_at": time.time(),
                     "error": str(exc),
-                }
+                })
             else:
-                status = {
+                status.update({
                     "status": "sync_succeeded",
-                    "generation": generation,
-                    "source_revision": self._tenant_base_revision,
+                    "applied_revision": source_revision,
+                    "dirty": False,
                     "updated_at": time.time(),
-                }
+                })
             self._persist_projection_recovery_status(name, status)
             self._projection_recovery_status[name] = status
 
     def _load_projection_recovery_status(self) -> dict[str, dict]:
+        self._authorize_tenant_memory()
         tenant_id = self.bot.config.tenant_id
         latest: dict[str, dict] = {}
         ledger = getattr(self.bot, "_execution_ledger", None)
         if ledger is None:
             return latest
         events = ledger.read()
+        current_revision = max((
+            event["payload"]["revision"] for event in events
+            if event.get("type") == "TENANT_MEMORY_COMMITTED"
+            and event.get("payload", {}).get("tenant_id") == tenant_id
+        ), default=0)
         for event in events:
             if event.get("type") != "PROJECTION_STATUS_UPDATED":
                 continue
@@ -284,18 +355,35 @@ class MemoryStorageBackend:
                 continue
             projection = payload.get("projection")
             status = payload.get("status")
-            if projection not in {"graph", "semantic"} or not isinstance(status, dict):
-                continue
+            if (
+                projection not in {"graph", "semantic"} or not isinstance(status, dict)
+                or event.get("committed") is not True
+            ):
+                raise ValueError("Invalid tenant projection status event")
+            status = _projection_status_metadata(status, current_revision=current_revision)
             previous = latest.get(projection)
             if previous is None or int(status.get("generation") or 0) >= int(previous.get("generation") or 0):
                 latest[projection] = deepcopy(status)
         for name, revision in _required_projection_revisions(events, tenant_id).items():
-            status = latest.get(name, {"generation": 0, "source_revision": None})
-            if int(status.get("source_revision") or 0) < revision:
-                latest[name] = {**status, "status": "dirty", "required_revision": revision}
+            status = latest.get(name, {
+                "generation": 0, "source_revision": None, "applied_revision": None,
+            })
+            status["required_revision"] = max(status.get("required_revision") or 0, revision)
+            if int(status.get("applied_revision") or 0) < revision:
+                status["dirty"] = True
+                if status.get("status") != "degraded":
+                    status["status"] = "dirty"
+            latest[name] = status
+        self._authorize_tenant_memory()
         return latest
 
     def _persist_projection_recovery_status(self, projection: str, status: dict) -> None:
+        from dadbot_system.delegation import tenant_mutation_fence
+
+        self._authorize_tenant_memory()
+        if projection not in {"graph", "semantic"}:
+            raise ValueError("Invalid projection name")
+        status = _projection_status_metadata(status)
         ledger = getattr(self.bot, "_execution_ledger", None)
         if ledger is None:
             raise RuntimeError("Projection recovery status requires a durable execution ledger")
@@ -316,7 +404,11 @@ class MemoryStorageBackend:
 
         for attempt in range(3):
             try:
-                ledger.write(event)
+                with tenant_mutation_fence(
+                    self.bot.config.tenant_id, required=self._authenticated_authority_required,
+                ):
+                    self._authorize_tenant_memory()
+                    ledger.write(event)
                 return
             except LedgerHeadConflict:
                 if attempt == 2:
@@ -486,7 +578,7 @@ class MemoryStorageBackend:
     def _repair_committed_indexes(self, revision: int) -> None:
         repaired = False
         try:
-            self.recover_local_projections()
+            self.recover_local_projections(reason="memory_commit")
             failed = [
                 name for name in ("graph", "semantic")
                 if self._projection_recovery_status.get(name, {}).get("status") != "sync_succeeded"
@@ -503,6 +595,10 @@ class MemoryStorageBackend:
                 self._tenant_recovery_required = True
 
     def committed_tenant_projection(self) -> dict | None:
+        committed = self._committed_tenant_snapshot()
+        return committed[1] if committed is not None else None
+
+    def _committed_tenant_snapshot(self) -> tuple[int, dict] | None:
         self._authorize_tenant_memory()
         ledger = getattr(self.bot, "_execution_ledger", None)
         if ledger is None:
@@ -512,7 +608,7 @@ class MemoryStorageBackend:
             return None
         if not isinstance(tenant.state, dict):
             raise RuntimeError("Committed tenant memory has no valid state")
-        return self._manager.normalize_memory_store(deepcopy(tenant.state))
+        return tenant.revision, self._manager.normalize_memory_store(deepcopy(tenant.state))
 
     def _require_snapshot_authority(self) -> None:
         if self.committed_tenant_projection() is not None:
