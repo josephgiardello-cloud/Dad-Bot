@@ -177,6 +177,33 @@ class LedgerBackend(ABC):
 # ---------------------------------------------------------------------------
 
 
+_ATOMIC_COPY_TYPES = frozenset({type(None), bool, int, float, str, bytes})
+
+
+def _copy_ledger_value(value: Any, memo: dict[int, Any] | None = None) -> Any:
+    """Copy built-in event containers; preserve deepcopy semantics for other types."""
+    kind = type(value)
+    if kind in _ATOMIC_COPY_TYPES:
+        return value
+    if memo is None:
+        memo = {}
+    identity = id(value)
+    if identity in memo:
+        return memo[identity]
+    if kind is dict:
+        result: dict[Any, Any] = {}
+        memo[identity] = result
+        for key, item in value.items():
+            result[key if type(key) is str else _copy_ledger_value(key, memo)] = _copy_ledger_value(item, memo)
+        return result
+    if kind is list:
+        items: list[Any] = []
+        memo[identity] = items
+        items.extend(_copy_ledger_value(item, memo) for item in value)
+        return items
+    return deepcopy(value, memo)
+
+
 class InMemoryLedgerBackend(LedgerBackend):
     """Volatile owned records; defensive copies make revision-token refresh safe."""
 
@@ -194,7 +221,7 @@ class InMemoryLedgerBackend(LedgerBackend):
     @_events.setter
     def _events(self, events: list[dict[str, Any]]) -> None:
         with self._lock:
-            self._records = deepcopy(events)
+            self._records = _copy_ledger_value(events)
             self._generation += 1
             self._append_snapshot = None
 
@@ -205,7 +232,7 @@ class InMemoryLedgerBackend(LedgerBackend):
         with self._lock:
             self._append_snapshot = None
             previous_digest = self._snapshot_token_unlocked()
-            payload = deepcopy(_coerce_event_record(event))
+            payload = _copy_ledger_value(_coerce_event_record(event))
             self._records.append(payload)
             self._generation += 1
             self._append_snapshot = (
@@ -214,7 +241,7 @@ class InMemoryLedgerBackend(LedgerBackend):
 
     def load(self) -> list[dict[str, Any]]:
         with self._lock:
-            return deepcopy(self._records)
+            return _copy_ledger_value(self._records)
 
     def load_if_changed(self, previous_digest: bytes | None) -> tuple[bytes, list[dict[str, Any]] | None]:
         with self._lock:

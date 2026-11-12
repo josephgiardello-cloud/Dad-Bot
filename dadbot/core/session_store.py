@@ -4,6 +4,7 @@ from copy import deepcopy
 from typing import Any
 
 from dadbot.core.execution_ledger import ExecutionLedger
+from dadbot.core.session_state_codec import apply_session_state_update
 
 
 class SessionMutationError(RuntimeError):
@@ -87,15 +88,8 @@ class SessionStore:
             raise ValueError("ledger event tenant does not match its payload")
         identity = self._identity(session_id, tenant_id)
         if event_type == "SESSION_STATE_UPDATED":
-            self._apply_kernel_mutation(
-                session_id=session_id,
-                tenant_id=tenant_id,
-                state_patch=dict(payload.get("state") or {}),
-                step_key=str(
-                    event.get("kernel_step_id") or "session_store.apply",
-                ),
-                trace_token=str(event.get("trace_id") or ""),
-            )
+            self._sessions[identity] = apply_session_state_update(self._sessions.get(identity) or {}, payload)
+            self._version += 1
         elif event_type == "SESSION_STATE_DELETED":
             self._sessions.pop(identity, None)
             self._version += 1

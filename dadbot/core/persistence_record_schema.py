@@ -3,6 +3,8 @@ from __future__ import annotations
 import copy
 from typing import Any
 
+from dadbot.core.ledger_backend import _copy_ledger_value
+
 PERSISTENCE_SCHEMA_VERSION = "persistence-record.v1"
 TRACE_EVENT_SCHEMA_VERSION = "trace-event.v1"
 REPLAY_RECORD_SCHEMA_VERSION = "replay-record.v1"
@@ -143,10 +145,10 @@ def _normalize_checkpoint_lock(lock: dict[str, Any]) -> dict[str, Any]:
 
 def _normalize_execution_state(execution_state: dict[str, Any]) -> dict[str, Any]:
     return {
-        "state": copy.deepcopy(dict(execution_state.get("state") or {})),
-        "metadata": copy.deepcopy(dict(execution_state.get("metadata") or {})),
-        "phase_history": copy.deepcopy(list(execution_state.get("phase_history") or [])),
-        "stage_traces": copy.deepcopy(list(execution_state.get("stage_traces") or [])),
+        "state": _copy_ledger_value(dict(execution_state.get("state") or {})),
+        "metadata": _copy_ledger_value(dict(execution_state.get("metadata") or {})),
+        "phase_history": _copy_ledger_value(list(execution_state.get("phase_history") or [])),
+        "stage_traces": _copy_ledger_value(list(execution_state.get("stage_traces") or [])),
         "event_sequence": _as_int(execution_state.get("event_sequence"), default=0),
     }
 

@@ -181,7 +181,7 @@ def test_persistence_lookups_do_not_copy_unrelated_state(
                 ledger, "read", lambda full=True, **_selection: original_read(full=full),
             )
             expected = lookups[operation]()
-        original_copy = execution_ledger.deepcopy
+        original_copy = execution_ledger._copy_ledger_value
         copied_lists = []
 
         def require_selected_copy(value):
@@ -193,7 +193,7 @@ def test_persistence_lookups_do_not_copy_unrelated_state(
                 ), "Unrelated session-state payload copied during lookup"
             return original_copy(value)
 
-        monkeypatch.setattr(execution_ledger, "deepcopy", require_selected_copy)
+        monkeypatch.setattr(execution_ledger, "_copy_ledger_value", require_selected_copy)
         assert lookups[operation]() == expected
         assert copied_lists
         ledger._backend_uncertain = True

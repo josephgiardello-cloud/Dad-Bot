@@ -5,6 +5,7 @@ import json
 import subprocess
 import sys
 import threading
+from copy import deepcopy
 
 import pytest
 
@@ -19,6 +20,7 @@ from dadbot.core.ledger_backend import (
     InMemoryLedgerBackend,
     LedgerHeadConflict,
     WALCorruptionError,
+    _copy_ledger_value,
 )
 from dadbot.core.ledger_index import LedgerIndex
 
@@ -32,6 +34,45 @@ def _session_event(value):
         "timestamp": "2026-01-01",
         "payload": {"state": {"value": value}},
     }
+
+
+def test_ledger_copy_preserves_shared_cycles_and_custom_copy_contracts():
+    class CustomMapping(dict):
+        def __deepcopy__(self, memo):
+            return CustomMapping(child=deepcopy(self["child"], memo))
+
+    shared = []
+    source = {"first": shared, "second": shared, "tuple": (shared,), "bytes": b"retained"}
+    source["custom"] = CustomMapping(child=shared)
+    source["custom_alias"] = source["custom"]
+    shared.append(source)
+
+    copied = _copy_ledger_value(source)
+    assert copied is not source
+    assert copied["first"] is copied["second"]
+    assert copied["first"][0] is copied
+    assert copied["tuple"][0] is copied["first"]
+    assert type(copied["tuple"]) is tuple
+    assert type(copied["custom"]) is CustomMapping
+    assert copied["custom"] is copied["custom_alias"]
+    assert copied["custom"]["child"] is copied["first"]
+    copied["first"].append("isolated")
+    assert len(source["first"]) == 1
+
+
+def test_replaced_native_append_still_receives_an_isolated_record(monkeypatch):
+    backend = InMemoryLedgerBackend()
+    ledger = ExecutionLedger(backend)
+    append = backend.append
+
+    def mutating_append(event, *, committed=False):
+        append(event, committed=committed)
+        event["payload"]["state"]["value"]["nested"].append("changed")
+
+    monkeypatch.setattr(backend, "append", mutating_append)
+    ledger.write(_session_event({"nested": [1]}))
+    assert ledger.read()[0]["payload"]["state"]["value"]["nested"] == [1]
+    assert ledger.verify_replay(mode="chain")["ok"]
 
 
 def test_native_memory_refresh_reuses_owned_appends_without_reloading_history(monkeypatch):
@@ -167,14 +208,14 @@ def test_digest_records_hash_complete_payloads_and_return_only_isolated_scalars(
         ledger.write(_session_event(value))
     before = ledger.read()
     copied = []
-    original_copy = execution_ledger.deepcopy
+    original_copy = execution_ledger._copy_ledger_value
 
     def capture_copy(value):
         copied.append(value)
         return original_copy(value)
 
     with monkeypatch.context() as patch:
-        patch.setattr(execution_ledger, "deepcopy", capture_copy)
+        patch.setattr(execution_ledger, "_copy_ledger_value", capture_copy)
         records = ledger.read_digest_records()
     assert not copied
     assert records == [
@@ -622,13 +663,13 @@ def test_payload_trace_selection_is_distinct_from_header_trace_and_precedes_copy
     expected = ledger.read()[1:]
     from dadbot.core import execution_ledger
 
-    original_copy = execution_ledger.deepcopy
+    original_copy = execution_ledger._copy_ledger_value
 
     def checked_copy(events):
         assert events == expected
         return original_copy(events)
 
-    monkeypatch.setattr(execution_ledger, "deepcopy", checked_copy)
+    monkeypatch.setattr(execution_ledger, "_copy_ledger_value", checked_copy)
     assert ledger.read(payload_trace_id="target") == expected
 
 
@@ -639,20 +680,20 @@ def test_hot_path_index_does_not_copy_checkpoint_payloads_and_preserves_trace_ro
     index = LedgerIndex(ledger)
     from dadbot.core import execution_ledger
 
-    original_copy = execution_ledger.deepcopy
+    original_copy = execution_ledger._copy_ledger_value
     snapshots = []
 
     def capture_copy(value):
         snapshots.append(value)
         return original_copy(value)
 
-    monkeypatch.setattr(execution_ledger, "deepcopy", capture_copy)
+    monkeypatch.setattr(execution_ledger, "_copy_ledger_value", capture_copy)
     assert index.trace_root("trace") == root["event_id"]
     assert index.has_ambiguous_request_inflight(session_id="test", request_id="request")
     assert snapshots[0][1] == started
     assert "payload" not in snapshots[0][0]
     assert len(snapshots) == 1
-    monkeypatch.setattr(execution_ledger, "deepcopy", original_copy)
+    monkeypatch.setattr(execution_ledger, "_copy_ledger_value", original_copy)
     ledger.write({
         **_session_event(3), "type": "JOB_COMPLETED", "payload": {"request_id": "request", "result": ["ok", False]},
     })

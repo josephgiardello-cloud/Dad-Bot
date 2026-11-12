@@ -3,6 +3,8 @@ from __future__ import annotations
 from copy import deepcopy
 from typing import Any
 
+from dadbot.core.session_state_codec import apply_session_state_update
+
 
 class CanonicalEventReducer:
     """Single system-wide reducer for ledger event -> state evolution."""
@@ -18,6 +20,7 @@ class CanonicalEventReducer:
             "jobs": {},
             "last_sequence": 0,
         }
+        sessions: dict[tuple[str, str], dict[str, Any]] = {}
 
         for event in ordered:
             event_type = str(event.get("type") or "")
@@ -29,14 +32,14 @@ class CanonicalEventReducer:
             if not session_id:
                 continue
 
-            session_state = dict(state["sessions"].get(session_id) or {})
+            identity = (str(event.get("tenant_id") or "").strip(), session_id)
+            session_state = dict(sessions.get(identity) or {})
             job_id = str(payload.get("job_id") or "").strip()
 
             if event_type == "SESSION_STATE_UPDATED":
-                patch = payload.get("state")
-                if isinstance(patch, dict):
-                    session_state.update(deepcopy(patch))
+                session_state = apply_session_state_update(session_state, payload)
             elif event_type == "SESSION_STATE_DELETED":
+                sessions.pop(identity, None)
                 state["sessions"].pop(session_id, None)
                 continue
             elif event_type == "JOB_STARTED" and job_id:
@@ -58,6 +61,7 @@ class CanonicalEventReducer:
                     "error": str(payload.get("error") or ""),
                 }
 
+            sessions[identity] = session_state
             state["sessions"][session_id] = session_state
 
         return state

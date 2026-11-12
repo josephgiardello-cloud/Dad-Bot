@@ -1,24 +1,7 @@
-"""Phase 4A: Orchestrator Integration Tests
+"""Phase 4A benchmark, orchestrator, and checkpoint integration tests.
 
-These tests demonstrate scenario execution through real DadBotOrchestrator.
-
-Tests are structured as proo tiers:
-1. Tier 1 (harness): mocked execution and synthetic/oline validation
-2. Tier 2 (partial integration): real orchestrator/checkpointer paths with controlled stubs
-3. Tier 3 (certiication-grade): reserved or strict, unmocked execution evidence
-
-When orchestrator is available, Phase 4A tests reveal real capability gaps.
-When orchestrator is unavailable, tests skip graceully.
-
-DESIGN PRINCIPLE:
-- Tier 1 tests never contribute to certiication scoring.
-- Tier 2 tests validate integration plumbing while isolating external model variance.
-- Tier 3 tests must run strict, unmocked orchestrator execution.
-- Any certiication-path inra ailure is ail-ast with explicit classiication.
-
-Run with:
-- pytest tests/test_phase4a.py -m phase4 --tb=short
-- pytest tests/test_phase4a.py -m durability -s
+Canonical turns use offline model transport, not mocked execution.
+Mock benchmark checks exercise only the harness.
 """
 
 
@@ -103,6 +86,15 @@ def _stub_llm(llm):
         yield
 
 
+
+
+def test_all_scenarios_pass_mock():
+    runner = BenchmarkRunner(strict=False, mode="mock")
+    results = runner.run_all_scenarios()
+
+    assert len(results) == len(SCENARIOS)
+    assert all(result["execution"]["completed"] for result in results)
+    assert all(result["scoring"]["success"] for result in results)
 
 
 def test_categories_complete_mock():
@@ -376,40 +368,41 @@ class TestScenarioSuiteValidation:
 @pytest.mark.integration
 class TestPhase4ARealCheckpointing:
 
-    # Patch run_agent on the LLM service to return a deterministic offline stub.
-    # This is the minimal shim: _execute_job still runs fully (checkpoint paths
-    # included); only the actual LLM inference call is replaced.
-    def _patch_run_agent(self, llm_service):
-        stub = AsyncMock(return_value=('[phase4a-offline]', True))
-        return patch.object(llm_service, "run_agent", new=stub)
+    @pytest.mark.asyncio
+    async def test_orchestrator_saves_checkpoint_after_real_turn(self, phase4a_db_path, make_test_dadbot):
+        orchestrator, checkpointer, llm = _make_orchestrator_with_checkpointer(
+            phase4a_db_path, make_test_dadbot=make_test_dadbot,
+        )
+        _assert_handle_turn_not_mocked(orchestrator, "real_checkpointing")
+
+        with _stub_llm(llm):
+            await orchestrator.handle_turn(
+                "hello dad",
+                session_id="cp-real-1",
+                confluence_key=confluence_key_for_turn("cp-real-1", "hello dad"),
+            )
+
+        assert checkpointer.checkpoint_count("cp-real-1") == 1
 
     @pytest.mark.asyncio
-    # BROKEN TEST REMOVED FOR SYNTAX RECOVERY
-    # async def test_orchestrator_hard_ails_when_conluence_key_omitted_in_strict_mode(
-    # ):
-    #     monkeypatch.setenv("DADBOT_GLOBAL_CONFLUENCE_MODE", "enorce")
-    #     monkeypatch.setenv("DADBOT_ALLOW_LEGACY_CONFLUENCE_KEY", "0")
-    #     confluence_key=confluence_key_or_turn("cp-real-1", "hello dad"),
-    #     orchestrator, checkpointer, llm = _make_orchestrator_with_checkpointer(phase4a_db_path, make_test_dadbot=make_test_dadbot)
-    #     with _stub_llm(llm):
-    #         response_text, success = await orchestrator.handle_turn(
-    #             confluence_key=confluence_key,
-    #             user_input="hello dad",
-    #             context=None,
-    #         )
-    #         assert not success
+    async def test_orchestrator_hard_fails_when_confluence_key_omitted_in_strict_mode(
+        self, phase4a_db_path, make_test_dadbot, caplog,
+    ):
+        orchestrator, checkpointer, llm = _make_orchestrator_with_checkpointer(
+            phase4a_db_path, strict=True, make_test_dadbot=make_test_dadbot,
+        )
+        _assert_handle_turn_not_mocked(orchestrator, "strict_confluence_boundary")
 
-        # BROKEN BLOCK REMOVED FOR SYNTAX RECOVERY
-        # _ail_certiication_gate("orchestrator_boot", exc)
-        # _assert_handle_turn_not_mocked(orchestrator, "strict_conluence_boundary")
-        # with _stub_llm(llm):
-        #     response_text, success = await orchestrator.handle_turn(
-        #         "missing key should ail",
-        #         session_id="strict-missing-key",
-        #     )
-        # assert success is False
-        # assert "Something went wrong" in str(response_text)
-        # assert checkpointer.checkpoint_count("strict-missing-key") == 0
+        with _stub_llm(llm):
+            response, success = await orchestrator.handle_turn(
+                "missing key should fail",
+                session_id="strict-missing-key",
+            )
+
+        assert success is False
+        assert "Something went wrong" in response
+        assert checkpointer.checkpoint_count("strict-missing-key") == 0
+        assert "Missing explicit confluence key" in caplog.text
 
     @pytest.mark.asyncio
     async def test_orchestrator_restores_state_after_simulated_restart(self, phase4a_db_path, make_test_dadbot):

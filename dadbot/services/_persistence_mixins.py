@@ -789,8 +789,7 @@ class _IntegrityVerifyMixin:
                 read = getattr(ledger, "read", None)
                 if callable(read):
                     raw_events = (
-                        read(
-                            event_types=frozenset({"GRAPH_CHECKPOINT"}),
+                        ledger.read_checkpoints(
                             payload_trace_id=trace_key or None,
                         )
                         if (

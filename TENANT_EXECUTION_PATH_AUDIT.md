@@ -367,7 +367,7 @@ of the carried-forward WIP commit set:
 
 | Test file | Current evidence / failure mode | Owning triage |
 |---|---|---|
-| [test_phase4a_fixed.py](tests/test_phase4a_fixed.py) | The historical F821 inventory included an undefined `required_fields` reference; the current file defines it, and `ruff check tests --select F821` remains clean. The maxfail-50 suite stage reported a mock trace assertion failure, a real-turn checkpoint failure, and four class setup errors due to a function-scoped `make_test_dadbot` fixture requested at class scope. No `NameError` from `conluence_key_or_turn` and no failure attributed to Phase 1.2/1.5 identity behavior appeared in this stage; those interactions remain unisolated. | Phase 4 for checkpoint/durability assertions; carried WIP for fixture/setup issues. Storage failures belong to Phase 3. |
+| [Phase 4A tests](tests/test_phase4a.py) | The historical legacy copy included an undefined `required_fields` reference, a mock trace assertion failure, a real-turn checkpoint failure, and fixture-scope errors. Its shared assertions have since been mapped to the canonical suite and its unique checks preserved there; the redundant copy is removed. No `NameError` from `conluence_key_or_turn` and no failure attributed to Phase 1.2/1.5 identity behavior appeared in the original maxfail-50 stage; those interactions remained unisolated. | Phase 4 for checkpoint/durability assertions; carried WIP for fixture/setup issues. Storage failures belong to Phase 3. |
 | [test_phase4a.py](tests/test_phase4a.py) | The maxfail-50 suite stage reported 16 failures in checkpoint, determinism, scale/pruning, and capability-profile assertions, plus seven setup errors (including missing `self` fixture on module-level tests). No current failure was attributed to Phase 1.2 validator or Phase 1.5 normalizer behavior; that possibility was not separately isolated. | Phase 4 for durability/checkpoint behavior; carried WIP for malformed fixtures/tests. Storage failures belong to Phase 3 only when confirmed storage-related. |
 | [test_phase4a_adversarial_collapse.py](tests/test_phase4a_adversarial_collapse.py) | Present in base history and modified in the carried WIP set. The maxfail-50 stage did not report a failure from this file; it does not isolate a possible Phase 1.2/1.5 interaction. | Phase 4 for durability; Phase 3 for confirmed storage failures; otherwise carried WIP. |
 
@@ -483,7 +483,9 @@ boot or alter Phase 3.3–3.9 stores.
   `tests/test_phase4a_adversarial_collapse.py`, and
   `tests/test_phase4a_fixed.py`. `ruff check tests --select F821` reports
   **All checks passed** (zero remaining). These were real test-code defects,
-  not intentional behavior changes; no tests were deleted.
+  not intentional behavior changes; no tests were deleted at that stage.
+  Later Phase 4A consolidation removed the redundant copy after mapping its
+  assertions and preserving its unique checks in the canonical suite.
 - **D3, deficit 24 — contract anchors:** replaced the two stale anchors with
   current test IDs, then ran `tools/contract_test_compiler.py
   --validate-nodeids`: 20 contracts, 23 node IDs, zero untested contracts,
