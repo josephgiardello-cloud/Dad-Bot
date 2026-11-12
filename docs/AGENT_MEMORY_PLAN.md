@@ -150,11 +150,10 @@ skips are not passes.
   status store.
 - Verify tenant-qualified index locations, caches, recovery status, and adapter
   filters under concurrent access.
-- Reconcile loop snapshot files with canonical authority. The current
-  [loop snapshot implementation](../dadbot/runtime/loop_snapshot.py) uses
-  session-only filenames, omits goal state, and writes progress from a reflection
-  hook before dispatch. A snapshot must not claim an uncommitted turn or serve as
-  an alternative authority.
+- Reconcile [loop snapshots](../dadbot/runtime/loop_snapshot.py) with canonical
+  authority. Tenant ownership and conservative driver-record accounting are
+  implemented; canonical receipt reconciliation and durable goal state remain
+  open. A snapshot must not serve as an alternative authority.
 - Make supported recovery paths fail explicitly on corrupt or mismatched state.
   Preserve source memory and ledger history during migration.
 
@@ -176,7 +175,7 @@ loop-resume tests rather than duplicating their coverage.
 | Explicit semantic repair | Committed catalog and existing tenant revision/publication fences | Implemented; empty catalogs clear obsolete rows; failures propagate |
 | Ledger recall fallback | Live authority and canonical tenant/session filtering before the event limit | Implemented |
 | Projection recovery | Existing ledger-backed projection status and tenant-qualified indexes | Existing coverage retained; metadata completeness and adapter certification remain open |
-| Loop snapshots | Currently session-named JSON files, outside production AssistantRuntime wiring | Tenant ownership, corruption handling, and committed-progress binding remain open |
+| Loop snapshots | Tenant/session-hashed paths, exact payload ownership, live authority, atomic publication | Diagnostic snapshots hardened; canonical receipt reconciliation and production resume wiring remain open |
 | Executive startup tasks | Tenant-qualified Markdown boards, owner headers, live authority, and fenced atomic updates | Implemented; unowned legacy tasks are preserved but excluded |
 
 Observation providers pass `record_access=False` to hybrid retrieval; custom
@@ -214,6 +213,26 @@ MCP, UI continuation, driver, tenant, authority, and architecture selection.
 Coverage includes a fresh-process reload, cross-tenant read/completion attempts,
 corrupt-source preservation, failed publication, concurrent updates, and captured
 authority revocation. This is targeted evidence, not a new full-suite result.
+
+Loop snapshots require an explicit tenant and versioned, owner-matched JSON.
+Missing reads do not create files; corrupt, ambiguous, or mismatched snapshots
+fail without replacement or deletion. Unowned legacy files remain untouched and
+excluded. New managers refuse to overwrite an existing run; reconcile canonical
+state before explicitly removing its snapshot.
+
+The reflection wrapper records only prior driver dispatch records, not the
+pending turn index. Failed, rejected, and skipped attempts do not advance the
+completed count. Finalization checks result identity and counters against its
+records. The wrapper can lag the last dispatch after interruption. These are
+local diagnostics, not receipt-backed proof: they cannot authorize skipping or
+resending actions. `AgentDriverLoop.run()` has no snapshot-resume API, and
+AssistantRuntime does not wire this standalone manager into production recovery.
+
+Snapshot repair validation: **151 passed, zero skips** across snapshot lifecycle,
+driver, memory bridge, authority, tenant isolation, and architecture tests.
+Coverage includes fresh-process reload, corruption preservation, publication
+failure, session-name collisions, and revocation. No new changed-file lint or
+Pylance error diagnostics; the full suite was not rerun.
 
 ## 2. Certify memory-first observation
 

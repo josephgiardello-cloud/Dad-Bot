@@ -50,6 +50,8 @@ class DriverLoopResult:
     failures: int = 0
     consecutive_noop: int = 0
     goal_blackboard: dict[str, str] = field(default_factory=dict)
+    tenant_id: str = "default"
+    session_id: str = "default"
 
 
 @dataclass(slots=True)
@@ -338,7 +340,7 @@ class AgentDriverLoop:
         reflection_hook: ReflectionHook | None = None,
         observation_hook: ObservationHook | None = None,
     ) -> DriverLoopResult:
-        result = DriverLoopResult()
+        result = DriverLoopResult(tenant_id=str(tenant_id or "default"), session_id=str(session_id or "default"))
         last_reply = ""
         last_action_input = str(initial_observation or "")
         pending_system_observation = ""
@@ -356,6 +358,8 @@ class AgentDriverLoop:
         for turn_index in range(1, int(self.policy.max_turns) + 1):
             normalized_session_id = str(session_id or "default")
             ctx_payload = {
+                "tenant_id": result.tenant_id,
+                "session_id": normalized_session_id,
                 "turn_index": turn_index,
                 "last_reply": last_reply,
                 "initial_observation": str(initial_observation or ""),
