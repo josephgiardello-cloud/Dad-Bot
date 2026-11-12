@@ -91,6 +91,12 @@ product.
   scale gates passed in 109.10 seconds (110 turns), 20.80 seconds (isolation),
   and 8.81 seconds (pruning). The repository-wide undefined-name check is clean.
   Unfiltered baseline certification remains open.
+- The next unfiltered run reached 1,795 passes, 105 skips, and 10 expected failures
+  before stopping on five failures. Their complete repair selection passes
+  52 cases with one optional slow-test skip: tenant-qualified recovery fixtures,
+  current telemetry paths and audit executor results, and projection scans that
+  exclude temporary application copies. The original scale gates passed again
+  in 107.92, 13.82, and 5.33 seconds. Another unfiltered pass is still required.
 - The tagged
   [durable submission authority suite](../tests/unit/test_durable_submission_authority.py)
   passes 29 cases. It covers delegation, revocation, worker execution, and

@@ -50,7 +50,7 @@ def _make_ledger_with_jobs(
     ledger = ExecutionLedger(**kwargs)
     writer = LedgerWriter(ledger)
     for _ in range(n):
-        job = ExecutionJob(session_id=session_id, user_input="hello")
+        job = ExecutionJob(session_id=session_id, user_input="hello", metadata={"tenant_id": "wave3-tenant"})
         writer.append_job_submitted(job)
         writer.append_session_bound(session_id, job.job_id)
         writer.append_job_queued(job)
@@ -319,6 +319,7 @@ class TestReducerSemanticCheck:
                 "trace_id": "t1",
                 "timestamp": 1.0,
                 "kernel_step_id": "test.patch.one",
+                "tenant_id": "wave3-tenant",
                 "payload": {"state": {"name": "Dad"}},
             }
         )
@@ -329,6 +330,7 @@ class TestReducerSemanticCheck:
                 "trace_id": "t1",
                 "timestamp": 2.0,
                 "kernel_step_id": "test.patch.two",
+                "tenant_id": "wave3-tenant",
                 "payload": {"state": {"mood": "calm"}},
             }
         )
@@ -338,8 +340,8 @@ class TestReducerSemanticCheck:
         store = SessionStore()
         store.rebuild_from_ledger(events)
 
-        assert store.get("s1") == reduced["sessions"]["s1"]
-        assert store.get("s1") == {"name": "Dad", "mood": "calm"}
+        assert store.get("s1", tenant_id="wave3-tenant") == reduced["sessions"]["s1"]
+        assert store.get("s1", tenant_id="wave3-tenant") == {"name": "Dad", "mood": "calm"}
 
     def test_system_health_check_reducer_semantic_passes(self):
         ledger = _make_ledger_with_jobs("s1")
@@ -550,7 +552,7 @@ class TestSnapshotEngine:
         from dadbot.core.control_plane import ExecutionJob
 
 
-        job2 = ExecutionJob(session_id="s1", user_input="second")
+        job2 = ExecutionJob(session_id="s1", user_input="second", metadata={"tenant_id": "wave3-tenant"})
         writer.append_job_submitted(job2)
         writer.append_session_bound("s1", job2.job_id)
         writer.append_job_queued(job2)
@@ -563,7 +565,7 @@ class TestSnapshotEngine:
         report = engine.replay_tail(snap, ledger=ledger, session_store=fresh_store)
 
         assert report["tail_events_applied"] > 0
-        final_state = fresh_store.get("s1")
+        final_state = fresh_store.get("s1", tenant_id="wave3-tenant")
         assert final_state is not None
         assert final_state.get("last_result") == {"reply": "second"}
 
