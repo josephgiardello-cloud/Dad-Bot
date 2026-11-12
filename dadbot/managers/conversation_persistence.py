@@ -256,7 +256,9 @@ class ConversationPersistenceManager:
         if not normalized:
             return None
         ledger = self._execution_ledger()
-        for event in reversed(ledger.read(event_types=frozenset({"GRAPH_CHECKPOINT"}))):
+        for event in reversed(ledger.read(
+            event_types=frozenset({"GRAPH_CHECKPOINT"}), payload_trace_id=normalized,
+        )):
             if str(event.get("type") or "") != "GRAPH_CHECKPOINT":
                 continue
             event_session_id = str(event.get("session_id") or "").strip()

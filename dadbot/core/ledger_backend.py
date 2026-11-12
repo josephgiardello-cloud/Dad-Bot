@@ -178,19 +178,50 @@ class LedgerBackend(ABC):
 
 
 class InMemoryLedgerBackend(LedgerBackend):
-    """Volatile in-memory backend.  Correct but not crash-durable."""
+    """Volatile owned records; defensive copies make revision-token refresh safe."""
 
     def __init__(self) -> None:
-        self._events: list[dict[str, Any]] = []
+        self._records: list[dict[str, Any]] = []
         self._lock = threading.RLock()
+        self._identity = uuid4().bytes
+        self._generation = 0
+        self._append_snapshot: tuple[bytes, bytes, int, dict[str, Any]] | None = None
+
+    @property
+    def _events(self) -> list[dict[str, Any]]:
+        return self.load()
+
+    @_events.setter
+    def _events(self, events: list[dict[str, Any]]) -> None:
+        with self._lock:
+            self._records = deepcopy(events)
+            self._generation += 1
+            self._append_snapshot = None
+
+    def _snapshot_token_unlocked(self) -> bytes:
+        return self._identity + str(self._generation).encode("ascii")
 
     def append(self, event: dict[str, Any] | SovereignEvent, *, committed: bool = False) -> None:
         with self._lock:
-            self._events.append(deepcopy(_coerce_event_record(event)))
+            self._append_snapshot = None
+            previous_digest = self._snapshot_token_unlocked()
+            payload = deepcopy(_coerce_event_record(event))
+            self._records.append(payload)
+            self._generation += 1
+            self._append_snapshot = (
+                self._snapshot_token_unlocked(), previous_digest, len(self._records), payload,
+            )
 
     def load(self) -> list[dict[str, Any]]:
         with self._lock:
-            return deepcopy(self._events)
+            return deepcopy(self._records)
+
+    def load_if_changed(self, previous_digest: bytes | None) -> tuple[bytes, list[dict[str, Any]] | None]:
+        with self._lock:
+            digest = self._snapshot_token_unlocked()
+            if digest == previous_digest:
+                return digest, None
+            return digest, self.load()
 
     def close(self) -> None:
         pass

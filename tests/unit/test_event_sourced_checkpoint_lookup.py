@@ -50,6 +50,7 @@ def _payload(trace_id: str, value: str) -> dict[str, Any]:
 def test_authority_checkpoint_lookup_copies_only_checkpoint_events(monkeypatch: pytest.MonkeyPatch) -> None:
     ledger = ExecutionLedger()
     _append(ledger, "UNRELATED", {"state": {"large": ["history"] * 100}})
+    _append(ledger, "GRAPH_CHECKPOINT", _payload("old-trace", "history"))
     payload = _payload("payload-trace", "saved")
     _append(ledger, "GRAPH_CHECKPOINT", payload)
     service = _service(ledger, monkeypatch)
@@ -59,6 +60,7 @@ def test_authority_checkpoint_lookup_copies_only_checkpoint_events(monkeypatch: 
         types = [event["type"] for event in events]
         copied_types.append(types)
         assert types == ["GRAPH_CHECKPOINT"]
+        assert events[0]["payload"]["trace_id"] == "payload-trace"
         return deepcopy(events)
 
     monkeypatch.setattr(ledger_module, "deepcopy", checked_copy)

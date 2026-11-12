@@ -349,12 +349,27 @@ class ExecutionLedger:
         backend = self._backend
         if (
             type(self) is not ExecutionLedger
-            or not isinstance(backend, (FileWALLedgerBackend, CRCFileWALLedgerBackend))
-            or type(backend) not in (FileWALLedgerBackend, CRCFileWALLedgerBackend)
             or self._replay_filters
             or self._authenticated_authority_required
             or _execution_authority.get() is not None
         ):
+            return None
+        if type(backend) is InMemoryLedgerBackend:
+            with backend._lock:
+                snapshot = backend._append_snapshot
+                if snapshot is not None:
+                    digest, prefix_digest, count, record = snapshot
+                    if (
+                        count == len(self._events) + 1
+                        and record == payload
+                        and (
+                            prefix_digest == previous_digest
+                            or (not self._events and count == 1)
+                        )
+                    ):
+                        return digest
+            return None
+        if type(backend) not in (FileWALLedgerBackend, CRCFileWALLedgerBackend):
             return None
         with backend._lock:
             snapshot = backend._append_verifier._snapshot
@@ -614,10 +629,10 @@ class ExecutionLedger:
                 current["last_result"] = payload.get("result")
         return current
 
-    def read(
+    def read(  # noqa: PLR0913
         self, full: bool = True, *,
         event_types: frozenset[str] | None = None, payload_types: frozenset[str] | None = None,
-        trace_id: str | None = None, job_id: str | None = None,
+        trace_id: str | None = None, job_id: str | None = None, payload_trace_id: str | None = None,
     ) -> list[dict[str, Any]]:
         """Return isolated events; supplied trace/job identities select their union."""
         with self._lock:
@@ -626,6 +641,11 @@ class ExecutionLedger:
             events = self._events if full else list(self._cache.get("recent_tail") or [])
             if event_types is not None:
                 events = [event for event in events if event.get("type") in event_types]
+            if payload_trace_id is not None:
+                events = [
+                    event for event in events
+                    if str(dict(event.get("payload") or {}).get("trace_id") or "").strip() == payload_trace_id
+                ]
             if trace_id is not None or job_id is not None:
                 events = [
                     event for event in events
@@ -738,6 +758,8 @@ class ExecutionLedger:
                 )
 
     def load_from_backend(self, *, only_if_changed: bool = False) -> int:
+        from dadbot_system.delegation import _execution_authority
+
         with self._lock:
             if only_if_changed:
                 self._ensure_backend_reconciled()
@@ -745,8 +767,14 @@ class ExecutionLedger:
             digest = None
             if (
                 only_if_changed and not self._replay_filters
-                and isinstance(self._backend, (FileWALLedgerBackend, CRCFileWALLedgerBackend))
-                and type(self._backend) in (FileWALLedgerBackend, CRCFileWALLedgerBackend)
+                and (
+                    type(self._backend) in (FileWALLedgerBackend, CRCFileWALLedgerBackend)
+                    or (
+                        type(self) is ExecutionLedger and type(self._backend) is InMemoryLedgerBackend
+                        and not self._authenticated_authority_required
+                        and _execution_authority.get() is None
+                    )
+                )
             ):
                 digest, loaded = self._backend.load_if_changed(self._backend_content_digest)
                 if loaded is None:

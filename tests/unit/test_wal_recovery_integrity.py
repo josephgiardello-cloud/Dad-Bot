@@ -34,6 +34,111 @@ def _session_event(value):
     }
 
 
+def test_native_memory_refresh_reuses_owned_appends_without_reloading_history(monkeypatch):
+    backend = InMemoryLedgerBackend()
+    ledger = ExecutionLedger(backend)
+
+    def unexpected_load():
+        raise AssertionError("unchanged owned history must not be copied or replayed")
+
+    monkeypatch.setattr(backend, "load", unexpected_load)
+    for value in range(3):
+        ledger.write(_session_event({"nested": [value]}))
+        assert ledger.refresh_tenant_memory("a").revision == 0
+    assert ledger.event_count() == 3
+
+
+def test_native_memory_records_and_replacement_are_defensive_copies():
+    backend = InMemoryLedgerBackend()
+    event = _session_event({"nested": [1]})
+    backend.append(event)
+    event["payload"]["state"]["value"]["nested"].append(2)
+    exported = backend.load()
+    exported[0]["payload"]["state"]["value"]["nested"].append(3)
+    view = backend._events
+    view[0]["payload"]["state"]["value"]["nested"].append(4)
+    assert backend.load()[0]["payload"]["state"]["value"]["nested"] == [1]
+
+    backend._events = exported
+    exported[0]["payload"]["state"]["value"]["nested"].append(5)
+    assert backend.load()[0]["payload"]["state"]["value"]["nested"] == [1, 3]
+
+
+def test_native_memory_refresh_observes_another_writer_and_then_reuses_verified_history(monkeypatch):
+    backend = InMemoryLedgerBackend()
+    reader = ExecutionLedger(backend)
+    reader.write(_session_event(1))
+    writer = ExecutionLedger(backend)
+    writer.load_from_backend()
+    writer.write(_session_event(2))
+    loads = []
+    original_load = backend.load
+
+    def capture_load():
+        loads.append(True)
+        return original_load()
+
+    monkeypatch.setattr(backend, "load", capture_load)
+    reader.load_from_backend(only_if_changed=True)
+    assert reader.read() == writer.read()
+    reader.load_from_backend(only_if_changed=True)
+    assert len(loads) == 1
+    reader.write(_session_event(3))
+    reader.load_from_backend(only_if_changed=True)
+    assert len(loads) == 1
+    assert reader.verify_replay(mode="chain")["ok"]
+
+
+@pytest.mark.parametrize("change", ["timestamp", "payload"])
+def test_native_memory_refresh_revalidates_same_length_replacements(change):
+    backend = InMemoryLedgerBackend()
+    ledger = ExecutionLedger(backend)
+    ledger.write(_session_event({"nested": [1]}))
+    replacement = backend.load()
+    if change == "timestamp":
+        replacement[0]["timestamp"] = "changed-metadata"
+    else:
+        replacement[0]["payload"]["state"]["value"]["nested"] = [2]
+    backend._events = replacement
+    if change == "payload":
+        with pytest.raises(RuntimeError, match="checksum chain"):
+            ledger.load_from_backend(only_if_changed=True)
+        with pytest.raises(RuntimeError, match="uncertain"):
+            ledger.read()
+    else:
+        ledger.load_from_backend(only_if_changed=True)
+        assert ledger.read()[0]["timestamp"] == "changed-metadata"
+
+
+@pytest.mark.parametrize("customization", ["backend", "ledger", "filter", "authenticated"])
+def test_native_memory_refresh_retains_full_validation_for_custom_views(monkeypatch, customization):
+    class CustomBackend(InMemoryLedgerBackend):
+        pass
+
+    class CustomLedger(ExecutionLedger):
+        pass
+
+    backend = CustomBackend() if customization == "backend" else InMemoryLedgerBackend()
+    ledger = CustomLedger(backend) if customization == "ledger" else ExecutionLedger(backend)
+    ledger.write(_session_event(1))
+    if customization == "filter":
+        ledger.add_replay_filter(lambda events: events)
+    elif customization == "authenticated":
+        ledger.require_authenticated_authority()
+
+    loads = []
+    original_load = backend.load
+
+    def capture_load():
+        loads.append(True)
+        return original_load()
+
+    monkeypatch.setattr(backend, "load", capture_load)
+    ledger.load_from_backend(only_if_changed=True)
+    ledger.load_from_backend(only_if_changed=True)
+    assert len(loads) == 2
+
+
 @pytest.mark.parametrize("backend_type", [FileWALLedgerBackend, CRCFileWALLedgerBackend])
 def test_json_normalized_append_keeps_verified_digest_and_original_runtime_types(tmp_path, backend_type):
     path = tmp_path / "ledger"
@@ -508,6 +613,23 @@ def test_trace_job_read_selection_preserves_union_order_and_payload_isolation():
     ledger._backend_uncertain = True
     with pytest.raises(RuntimeError, match="reload"):
         ledger.read(trace_id="wanted", job_id="job-1")
+
+
+def test_payload_trace_selection_is_distinct_from_header_trace_and_precedes_copy(monkeypatch):
+    ledger = ExecutionLedger()
+    ledger.write({**_session_event(1), "trace_id": "target", "payload": {"trace_id": "other"}})
+    ledger.write({**_session_event(2), "trace_id": "other", "payload": {"trace_id": " target "}})
+    expected = ledger.read()[1:]
+    from dadbot.core import execution_ledger
+
+    original_copy = execution_ledger.deepcopy
+
+    def checked_copy(events):
+        assert events == expected
+        return original_copy(events)
+
+    monkeypatch.setattr(execution_ledger, "deepcopy", checked_copy)
+    assert ledger.read(payload_trace_id="target") == expected
 
 
 def test_hot_path_index_does_not_copy_checkpoint_payloads_and_preserves_trace_roots(monkeypatch):

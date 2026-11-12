@@ -1,8 +1,11 @@
 from __future__ import annotations
 
+from types import SimpleNamespace
+
 import pytest
 
 from dadbot.core.core_state import CoreState, InputEvent, deterministic_id, project_views, transition
+from dadbot.core.persistence_coordinator import PersistenceCoordinator
 
 pytestmark = pytest.mark.unit
 
@@ -87,3 +90,18 @@ def test_projections_are_recomputed_from_single_core_state() -> None:
     assert len(views.canonical.events) == 2
     assert views.execution.state.last_response == "r2"
     assert views.facade.as_payload()["event_count"] == 2
+
+
+def test_committing_turns_preserves_existing_memory_without_reinserting_it() -> None:
+    initial = transition(CoreState(), InputEvent(
+        "memories_replaced", {"memories": [{"summary": "saved", "category": "prefs"}]},
+    ))
+    session = {"state": {"core_state": initial.to_dict()}}
+    coordinator = PersistenceCoordinator()
+    for turn in range(3):
+        job = SimpleNamespace(trace_id=f"trace-{turn}", job_id=f"job-{turn}", metadata={})
+        coordinator.apply_turn_committed_core_state(session=session, job=job, result=("ok", False))
+        restored = CoreState.from_dict(session["state"]["core_state"])
+        assert restored.memory.to_dict_list() == initial.memory.to_dict_list()
+        assert restored.execution.trace_id == job.trace_id
+        assert restored.execution.last_response == "ok"

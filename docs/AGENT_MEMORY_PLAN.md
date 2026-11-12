@@ -51,10 +51,17 @@ product.
   error reporting; the separate-process checkpoint test now executes real turns.
 - The repaired Phase 4A/harness/authority selection passes 81 cases with one
   pre-existing skip. A separate 8-session/40-turn isolation check also passes.
-- Milestone 0 remains open. The 110-turn checkpoint soak exceeds its unchanged
-  120-second limit, and the 20-turn pruning check exceeds 30 seconds. Timeout
-  stacks show ledger refresh, validation, and deep-copy work. Neither the full
-  baseline nor long-run performance is certified.
+- The latest ledger/checkpoint/reducer/authority selection passes 281 cases.
+  The 20-turn pruning check now passes in 11.96 seconds under its original
+  30-second limit; 8-session/40-turn isolation passes in 21.04 seconds.
+  Native in-memory ledgers own their records and use revision tokens to avoid
+  unchanged-history reloads. File-WAL byte verification is unchanged.
+  Checkpoint lookups filter payload trace IDs before copying. Turn commit no
+  longer reinserts its existing memory into the reducer.
+- Milestone 0 remains open. The 110-turn checkpoint soak still exceeds its
+  unchanged 120-second limit and is excluded from that 281-case selection.
+  Profiling shows growing full-state histories, repeated copies, and compaction
+  hashing. Neither the full baseline nor long-run performance is certified.
 - The tagged
   [durable submission authority suite](../tests/unit/test_durable_submission_authority.py)
   passes 29 cases. It covers delegation, revocation, worker execution, and

@@ -789,7 +789,10 @@ class _IntegrityVerifyMixin:
                 read = getattr(ledger, "read", None)
                 if callable(read):
                     raw_events = (
-                        read(event_types=frozenset({"GRAPH_CHECKPOINT"}))
+                        read(
+                            event_types=frozenset({"GRAPH_CHECKPOINT"}),
+                            payload_trace_id=trace_key or None,
+                        )
                         if (
                             type(ledger) is ExecutionLedger
                             and getattr(read, "__func__", None) is ExecutionLedger.read

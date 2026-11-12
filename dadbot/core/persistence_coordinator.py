@@ -6,8 +6,8 @@ from dadbot.contracts import FinalizedTurnResult
 from dadbot.core.belief_state_engine import BeliefStateEngine
 from dadbot.core.core_state import CoreState, InputEvent, project_views, transition
 from dadbot.core.event_clock import now as _now
-from dadbot.core.planning_utils import build_semantic_memory_candidates
 from dadbot.core.execution_context import get_active_core_state
+from dadbot.core.planning_utils import build_semantic_memory_candidates
 
 
 class PersistenceCoordinator:
@@ -40,7 +40,6 @@ class PersistenceCoordinator:
                     "trace_id": str(job.trace_id or ""),
                     "response": str(result[0] if isinstance(result, tuple) and len(result) >= 1 else ""),
                     "should_end": bool(result[1] if isinstance(result, tuple) and len(result) >= 2 else False),
-                    "memory_retrieval_set": base_core_state.memory.to_dict_list(),
                 },
                 metadata={
                     "job_id": str(job.job_id or ""),
