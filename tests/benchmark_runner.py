@@ -724,6 +724,7 @@ class BenchmarkRunner:
             category=scenario.category,
             input_text=scenario.input_text,
         )
+        state: dict[str, Any] = {}
 
         try:
             self._turn_counter += 1

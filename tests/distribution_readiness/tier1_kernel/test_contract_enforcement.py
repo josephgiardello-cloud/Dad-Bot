@@ -33,11 +33,19 @@ class TestNodeStageContracts:
         """Graph execution must stamp node-contract hash into determinism manifest."""
 
         class _SafeNode:
+            name = "safety"
+
             async def run(self, ctx):
                 ctx.state["safe_result"] = ("ok", False)
                 return ctx
 
-        graph = TurnGraph(registry=None, nodes=[_SafeNode()])
+        class _SaveNode:
+            name = "save"
+
+            async def run(self, ctx):
+                return ctx
+
+        graph = TurnGraph(registry=None, nodes=[_SafeNode(), _SaveNode()])
         ctx = TurnContext(user_input="contract version stamp")
         result = __import__("asyncio").run(graph.execute(ctx))
 

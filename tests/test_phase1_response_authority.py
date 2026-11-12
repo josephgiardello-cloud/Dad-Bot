@@ -286,6 +286,7 @@ class TestPhase1ResponseAuthority:
             ),
             model_port=_ModelPortStub(),
             ACTIVE_MODEL="test-model",
+            LIGHT_MODE=True,
         )
         service = AgentService(service_bot)
         turn_context = SimpleNamespace(user_input="hello", attachments=None, state={}, metadata={})

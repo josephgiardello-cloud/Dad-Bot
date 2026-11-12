@@ -177,20 +177,78 @@ class LedgerBackend(ABC):
 # ---------------------------------------------------------------------------
 
 
+_ATOMIC_COPY_TYPES = frozenset({type(None), bool, int, float, str, bytes})
+
+
+def _copy_ledger_value(value: Any, memo: dict[int, Any] | None = None) -> Any:
+    """Copy built-in event containers; preserve deepcopy semantics for other types."""
+    kind = type(value)
+    if kind in _ATOMIC_COPY_TYPES:
+        return value
+    if memo is None:
+        memo = {}
+    identity = id(value)
+    if identity in memo:
+        return memo[identity]
+    if kind is dict:
+        result: dict[Any, Any] = {}
+        memo[identity] = result
+        for key, item in value.items():
+            result[key if type(key) is str else _copy_ledger_value(key, memo)] = _copy_ledger_value(item, memo)
+        return result
+    if kind is list:
+        items: list[Any] = []
+        memo[identity] = items
+        items.extend(_copy_ledger_value(item, memo) for item in value)
+        return items
+    return deepcopy(value, memo)
+
+
 class InMemoryLedgerBackend(LedgerBackend):
-    """Volatile in-memory backend.  Correct but not crash-durable."""
+    """Volatile owned records; defensive copies make revision-token refresh safe."""
 
     def __init__(self) -> None:
-        self._events: list[dict[str, Any]] = []
+        self._records: list[dict[str, Any]] = []
         self._lock = threading.RLock()
+        self._identity = uuid4().bytes
+        self._generation = 0
+        self._append_snapshot: tuple[bytes, bytes, int, dict[str, Any]] | None = None
+
+    @property
+    def _events(self) -> list[dict[str, Any]]:
+        return self.load()
+
+    @_events.setter
+    def _events(self, events: list[dict[str, Any]]) -> None:
+        with self._lock:
+            self._records = _copy_ledger_value(events)
+            self._generation += 1
+            self._append_snapshot = None
+
+    def _snapshot_token_unlocked(self) -> bytes:
+        return self._identity + str(self._generation).encode("ascii")
 
     def append(self, event: dict[str, Any] | SovereignEvent, *, committed: bool = False) -> None:
         with self._lock:
-            self._events.append(deepcopy(_coerce_event_record(event)))
+            self._append_snapshot = None
+            previous_digest = self._snapshot_token_unlocked()
+            payload = _copy_ledger_value(_coerce_event_record(event))
+            self._records.append(payload)
+            self._generation += 1
+            self._append_snapshot = (
+                self._snapshot_token_unlocked(), previous_digest, len(self._records), payload,
+            )
 
     def load(self) -> list[dict[str, Any]]:
         with self._lock:
-            return deepcopy(self._events)
+            return _copy_ledger_value(self._records)
+
+    def load_if_changed(self, previous_digest: bytes | None) -> tuple[bytes, list[dict[str, Any]] | None]:
+        with self._lock:
+            digest = self._snapshot_token_unlocked()
+            if digest == previous_digest:
+                return digest, None
+            return digest, self.load()
 
     def close(self) -> None:
         pass

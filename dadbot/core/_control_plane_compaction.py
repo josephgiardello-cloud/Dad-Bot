@@ -24,10 +24,13 @@ class CompactionMixin:
     def _stable_hash(payload: Any) -> str:
         return semantic_hash(payload)
 
-    def _job_trace_events(self, job) -> list[dict[str, Any]]:
+    def _job_trace_events(self, job, *, payload_fields: frozenset[str] | None = None) -> list[dict[str, Any]]:
         trace_id = str(job.trace_id or "").strip()
         job_id = str(job.job_id or "").strip()
-        events = self.ledger.read(trace_id=trace_id, job_id=job_id)
+        if payload_fields is None:
+            events = self.ledger.read(trace_id=trace_id, job_id=job_id)
+        else:
+            events = self.ledger.read(trace_id=trace_id, job_id=job_id, payload_fields=payload_fields)
         return sorted(events, key=lambda item: int(item.get("sequence") or 0))
 
     @staticmethod

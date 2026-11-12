@@ -12,8 +12,9 @@ import pytest
 from dadbot.core.control_plane import ControlPlaneOptions, ExecutionControlPlane, SessionRegistry
 from dadbot.core.execution_ledger import ExecutionLedger
 from dadbot.core.kernel_gateway import KernelGateway
-from dadbot.core.ledger_backend import CRCFileWALLedgerBackend, FileWALLedgerBackend
+from dadbot.core.ledger_backend import CRCFileWALLedgerBackend, FileWALLedgerBackend, InMemoryLedgerBackend
 from dadbot.core.ledger_writer import LedgerWriter
+from dadbot.core.session_state_codec import apply_session_state_update, encode_session_state_update
 from dadbot.core.session_store import SessionStore
 from dadbot.core.tenant_session import tenant_session_scope
 
@@ -280,6 +281,190 @@ def test_session_state_failure_never_publishes_registry_changes(
         _merge(plane, {"counter": 2})
     assert _state(plane)["counter"] == 1
     assert ledger._backend_uncertain is True
+
+
+def test_native_memory_merge_keeps_full_patches_without_running_delta_copy(monkeypatch: pytest.MonkeyPatch) -> None:
+    ledger = ExecutionLedger()
+    plane = _plane(ledger)
+
+    def unexpected_delta(*_args: Any, **_kwargs: Any) -> dict[str, Any]:
+        raise AssertionError("Native memory writes do not use state deltas")
+
+    monkeypatch.setattr(ExecutionLedger, "session_state_delta", unexpected_delta)
+    patch = {"nested": {"values": ["retained"]}}
+    _merge(plane, patch)
+    _merge(plane, patch)
+    assert [event["payload"]["state"] for event in _state_events(ledger)] == [patch, patch]
+    patch["nested"]["values"].append("caller mutation")
+    assert _state(plane)["nested"]["values"] == ["retained", "caller mutation"]
+    assert _state_events(ledger)[-1]["payload"]["state"]["nested"]["values"] == ["retained"]
+
+
+@pytest.mark.parametrize("backend_type", [InMemoryLedgerBackend, FileWALLedgerBackend, CRCFileWALLedgerBackend])
+def test_history_deltas_reduce_bytes_and_recover_exact_state(tmp_path: Path, backend_type: type) -> None:
+    from dadbot.core.event_reducer import CanonicalEventReducer
+
+    backend = backend_type() if backend_type is InMemoryLedgerBackend else backend_type(tmp_path / "history.wal")
+    ledger = ExecutionLedger(backend)
+    plane = _plane(ledger)
+    history = [{"id": index, "text": "x" * 1000} for index in range(32)]
+    full_bytes = 0
+    expected = {}
+    for turn in range(8):
+        history = [*history, {"id": 32 + turn, "text": "new" * 300}]
+        expected = {"core_state": {"events": history, "version": turn}, "counter": turn}
+        full_bytes += len(json.dumps(expected))
+        _merge(plane, expected)
+    events = _state_events(ledger)
+    assert all("state_history_delta" in event["payload"] for event in events[1:])
+    assert sum(len(json.dumps(event["payload"])) for event in events) < full_bytes / 3
+    restored = ExecutionLedger(backend)
+    restored.load_from_backend()
+    store = SessionStore(projection_only=True)
+    store.rebuild_from_ledger(restored.read())
+    assert store.get("shared", tenant_id="tenant-a") == expected
+    assert CanonicalEventReducer().reduce(restored.read())["sessions"]["shared"] == expected
+    assert restored.verify_replay(mode="chain")["ok"]
+    assert restored.replay_hash() == ledger.replay_hash()
+    restored.load_from_backend(only_if_changed=True)
+    _merge(_plane(restored), {**expected, "core_state": {**expected["core_state"], "events": [*history, {"id": 99}]}})
+    continued = {**expected["core_state"], "events": [*history, {"id": 99}, 100]}
+    _merge(_plane(restored), {**expected, "core_state": continued})
+    assert "state_history_delta" in _state_events(restored)[-1]["payload"]
+
+
+@pytest.mark.parametrize("mutation", ["base", "version", "duplicate", "overlap", "conflict", "append_type"])
+def test_history_decoder_rejects_invalid_references_without_mutating_the_base(mutation: str) -> None:
+    current = {"core_state": {"events": [{"text": "x" * 1000}]}}
+    payload = encode_session_state_update(current, {"core_state": {"events": [*current["core_state"]["events"], 2]}})
+    field = payload["state_history_delta"]["fields"][0]
+    if mutation == "base":
+        field["base_hash"] = "0" * 64
+    elif mutation == "version":
+        payload["state_history_delta"]["version"] = True
+    elif mutation == "duplicate":
+        payload["state_history_delta"]["fields"].append(deepcopy(field))
+    elif mutation == "overlap":
+        payload["state_history_delta"]["fields"].append({**field, "path": ["core_state"]})
+    elif mutation == "conflict":
+        payload["state"]["core_state"]["events"] = []
+    else:
+        field["append"] = {}
+    before = deepcopy(current)
+    with pytest.raises(RuntimeError, match="history delta"):
+        apply_session_state_update(current, payload)
+    assert current == before
+    with pytest.raises(RuntimeError, match="history delta"):
+        apply_session_state_update({}, encode_session_state_update(
+            before, {"core_state": {"events": [*before["core_state"]["events"], 2]}},
+        ))
+
+
+@pytest.mark.parametrize("backend_type", [InMemoryLedgerBackend, FileWALLedgerBackend, CRCFileWALLedgerBackend])
+def test_rolling_history_references_reduce_bytes_and_recover_exact_windows(tmp_path: Path, backend_type: type) -> None:
+    from dadbot.core.event_reducer import CanonicalEventReducer
+
+    backend = backend_type() if backend_type is InMemoryLedgerBackend else backend_type(tmp_path / "rolling.wal")
+    ledger = ExecutionLedger(backend)
+    plane = _plane(ledger)
+    history = [{"id": index, "text": "x" * 1000} for index in range(32)]
+    full_bytes = 0
+    expected = {}
+    for turn in range(8):
+        if turn:
+            history = history[4:] + [{"id": 32 + turn * 4 + index, "text": "y" * 1000} for index in range(4)]
+        expected = {"execution_timeline": history}
+        full_bytes += len(json.dumps(expected))
+        _merge(plane, expected)
+    events = _state_events(ledger)
+    assert all(event["payload"]["state_history_delta"]["version"] == 2 for event in events[1:])
+    assert all(event["payload"]["state_history_delta"]["fields"][0]["drop_prefix"] == 4 for event in events[1:])
+    assert sum(len(json.dumps(event["payload"])) for event in events) < full_bytes / 3
+    assert events[0]["payload"]["state"]["execution_timeline"][0]["id"] == 0
+    restored = ExecutionLedger(backend)
+    restored.load_from_backend()
+    store = SessionStore(projection_only=True)
+    store.rebuild_from_ledger(restored.read())
+    assert store.get("shared", tenant_id="tenant-a") == expected
+    assert CanonicalEventReducer().reduce(restored.read())["sessions"]["shared"] == expected
+    assert restored.verify_replay(mode="chain")["ok"]
+    assert restored.replay_hash() == ledger.replay_hash()
+
+
+@pytest.mark.parametrize("invalid", [-1, True, 9, 1.0, "legacy"])
+def test_rolling_history_rejects_invalid_offsets_and_legacy_envelopes(invalid: Any) -> None:
+    current = {"history": [{"id": index, "text": "x" * 1000} for index in range(8)]}
+    expected = {"history": [*current["history"][2:], {"id": 9}]}
+    payload = encode_session_state_update(current, expected)
+    if invalid == "legacy":
+        payload["state_history_delta"]["version"] = 1
+    else:
+        payload["state_history_delta"]["fields"][0]["drop_prefix"] = invalid
+    before = deepcopy(current)
+    with pytest.raises(RuntimeError, match="history delta"):
+        apply_session_state_update(current, payload)
+    assert current == before
+
+
+def test_rolling_history_preserves_shorter_windows_and_nonmatching_replacements() -> None:
+    current = {"history": [{"id": index, "text": "x" * 1000} for index in range(8)]}
+    for history in (current["history"][3:7], [{"unrelated": True}], []):
+        patch = {"history": history}
+        payload = encode_session_state_update(current, patch)
+        assert apply_session_state_update(current, payload) == patch
+        assert current["history"][0]["id"] == 0
+    dictionary = {"history": {"kept": "x" * 1000}}
+    payload = encode_session_state_update(dictionary, {"history": {**dictionary["history"], "added": True}})
+    payload["state_history_delta"]["version"] = 2
+    payload["state_history_delta"]["fields"][0]["drop_prefix"] = 0
+    with pytest.raises(RuntimeError, match="history delta"):
+        apply_session_state_update(dictionary, payload)
+
+
+def test_history_codec_preserves_replacements_deletions_json_types_and_user_keys() -> None:
+    current = {"nested": {"history": [True] * 100, "removed": None}, "state_history_delta": {"user": True}}
+    patch = {"nested": {"history": [1] * 100, "added": -0.0}, "state_history_delta": {"user": False}}
+    payload = encode_session_state_update(current, patch)
+    restored = apply_session_state_update(current, payload)
+    assert json.dumps(restored, sort_keys=True) == json.dumps(patch, sort_keys=True)
+    assert current["nested"]["history"][0] is True
+    shorter = {"nested": {"history": [None], "added": None}}
+    restored = apply_session_state_update(restored, encode_session_state_update(restored, shorter))
+    assert restored["nested"] == shorter["nested"]
+
+
+def test_history_codec_preserves_signed_zero_and_native_value_types() -> None:
+    class Text(str):
+        pass
+
+    for before, after in [([0.0] * 100, [-0.0] * 100), ([Text("x" * 1000)], ["x" * 1000])]:
+        current = {"history": before}
+        patch = {"history": after}
+        restored = apply_session_state_update(current, encode_session_state_update(current, patch))
+        assert json.dumps(restored) == json.dumps(patch)
+        assert type(restored["history"][0]) is type(after[0])
+
+
+def test_history_projection_is_tenant_scoped_and_replays_snapshot_tail(tmp_path: Path) -> None:
+    from dadbot.core.snapshot_engine import SnapshotEngine
+
+    ledger = ExecutionLedger(FileWALLedgerBackend(tmp_path / "history.wal"))
+    plane = _plane(ledger)
+    initial = {"history": [{"text": "retained" * 200}]}
+    _merge(plane, initial)
+    _merge(plane, {"history": [{"text": "other" * 200}]}, tenant="tenant-b")
+    store = SessionStore(projection_only=True)
+    store.rebuild_from_ledger(ledger.read())
+    engine = SnapshotEngine()
+    with KernelGateway.open_scope():
+        snapshot = engine.take_snapshot(ledger=ledger, session_store=store)
+    expected = {"history": [*initial["history"], {"text": "next"}]}
+    _merge(plane, expected)
+    recovered = SessionStore(projection_only=True)
+    engine.restore_from_snapshot(snapshot, session_store=recovered)
+    engine.replay_tail(snapshot=snapshot, ledger=ledger, session_store=recovered)
+    assert recovered.get("shared", tenant_id="tenant-a") == expected
+    assert recovered.get("shared", tenant_id="tenant-b") == {"history": [{"text": "other" * 200}]}
 
 
 def test_session_state_patch_rejects_cross_tenant_scope(tmp_path: Path) -> None:

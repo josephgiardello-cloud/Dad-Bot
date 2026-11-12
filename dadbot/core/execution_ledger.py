@@ -4,7 +4,7 @@ import hashlib
 import json
 import threading
 from collections.abc import Callable
-from contextlib import AbstractContextManager
+from contextlib import AbstractContextManager, nullcontext
 from copy import deepcopy
 from typing import Any
 
@@ -19,6 +19,7 @@ from dadbot.core.ledger_backend import (
     FileWALLedgerBackend,
     InMemoryLedgerBackend,
     SequenceValidator,
+    _copy_ledger_value,
 )
 
 _TAIL_LIMIT = 256
@@ -178,6 +179,8 @@ class ExecutionLedger:
         self._lock = threading.RLock()
         self._session_heads: dict[tuple[str, str], str] = {}
         self._session_indices: dict[tuple[str, str], int] = {}
+        self._session_state_projections: dict[tuple[str, str], dict[str, Any]] = {}
+        self._checkpoint_projections: dict[tuple[str, str], dict[str, Any]] = {}
         self._write_guard_depth = 0
         self._tenant_memory_commit_depth = 0
         self._strict_writes = bool(strict_writes)
@@ -254,6 +257,13 @@ class ExecutionLedger:
         self._cache["trace_sequence_counters"] = trace_sequence_counters
         self._cache["cache_rebuild_count"] = int(self._cache.get("cache_rebuild_count") or 0) + 1
         self._cache["version"] = int(self._cache.get("version") or 0) + 1
+        projections: dict[tuple[str, str], dict[str, Any]] = {}
+        checkpoints: dict[tuple[str, str], dict[str, Any]] = {}
+        for event in self._events:
+            self._project_session_event(event, projections)
+            self._project_checkpoint_event(event, checkpoints)
+        self._session_state_projections = projections
+        self._checkpoint_projections = checkpoints
 
     def telemetry_snapshot(self) -> dict[str, Any]:
         with self._lock:
@@ -330,7 +340,19 @@ class ExecutionLedger:
             tail = tail[-_TAIL_LIMIT:]
         cache["recent_tail"] = tail
 
-    def _record_committed_event(self, payload: dict[str, Any], identity: tuple[str, str]) -> None:
+    def _record_committed_event(
+        self, payload: dict[str, Any], identity: tuple[str, str], *,
+        session_projections: dict[tuple[str, str], dict[str, Any]] | None = None,
+        checkpoint_projections: dict[tuple[str, str], dict[str, Any]] | None = None,
+    ) -> None:
+        if session_projections is None:
+            self._project_session_event(payload, self._session_state_projections)
+        else:
+            self._session_state_projections = session_projections
+        if checkpoint_projections is None:
+            self._project_checkpoint_event(payload, self._checkpoint_projections)
+        else:
+            self._checkpoint_projections = checkpoint_projections
         cache = self._cache
         self._update_session_heads(payload, identity)
         self._events.append(payload)
@@ -343,18 +365,75 @@ class ExecutionLedger:
         self.validate_cache()
         self._backend_uncertain = False
 
+    @staticmethod
+    def _project_session_event(
+        event: dict[str, Any], projections: dict[tuple[str, str], dict[str, Any]],
+    ) -> None:
+        from dadbot.core.session_state_codec import apply_session_state_update
+
+        event_type = event.get("type")
+        if event_type not in {"SESSION_STATE_UPDATED", "SESSION_STATE_DELETED", "JOB_COMPLETED"}:
+            return
+        tenant = str(event.get("tenant_id") or "").strip()
+        session = str(event.get("session_id") or "default").strip()
+        payload = dict(event.get("payload") or {})
+        owner = str(payload.get("tenant_id") or "").strip()
+        if owner and owner != tenant:
+            raise ValueError("ledger event tenant does not match its payload")
+        identity = (tenant, session)
+        if event_type == "SESSION_STATE_DELETED":
+            projections.pop(identity, None)
+        elif event_type == "SESSION_STATE_UPDATED":
+            projections[identity] = apply_session_state_update(projections.get(identity) or {}, payload)
+        else:
+            state = dict(projections.get(identity) or {})
+            state["last_result"] = _copy_ledger_value(payload.get("result"))
+            projections[identity] = state
+
+    @staticmethod
+    def _project_checkpoint_event(
+        event: dict[str, Any], projections: dict[tuple[str, str], dict[str, Any]],
+    ) -> None:
+        from dadbot.core.session_state_codec import apply_checkpoint_update
+
+        if event.get("type") != "GRAPH_CHECKPOINT":
+            return
+        identity = (str(event.get("tenant_id") or "").strip(), str(event.get("session_id") or "default").strip())
+        payload = dict(event.get("payload") or {})
+        previous = dict(projections.get(identity, {}).get("payload") or {})
+        projections[identity] = {
+            "event_id": event.get("event_id"),
+            "wire_payload_hash": _event_digest_record(event)["payload_hash"],
+            "payload": apply_checkpoint_update(previous, payload),
+        }
+
     def _verified_append_digest(self, payload: dict[str, Any], previous_digest: bytes | None) -> bytes | None:
         from dadbot_system.delegation import _execution_authority
 
         backend = self._backend
         if (
             type(self) is not ExecutionLedger
-            or not isinstance(backend, (FileWALLedgerBackend, CRCFileWALLedgerBackend))
-            or type(backend) not in (FileWALLedgerBackend, CRCFileWALLedgerBackend)
             or self._replay_filters
             or self._authenticated_authority_required
             or _execution_authority.get() is not None
         ):
+            return None
+        if type(backend) is InMemoryLedgerBackend:
+            with backend._lock:
+                snapshot = backend._append_snapshot
+                if snapshot is not None:
+                    digest, prefix_digest, count, record = snapshot
+                    if (
+                        count == len(self._events) + 1
+                        and record == payload
+                        and (
+                            prefix_digest == previous_digest
+                            or (not self._events and count == 1)
+                        )
+                    ):
+                        return digest
+            return None
+        if type(backend) not in (FileWALLedgerBackend, CRCFileWALLedgerBackend):
             return None
         with backend._lock:
             snapshot = backend._append_verifier._snapshot
@@ -376,26 +455,65 @@ class ExecutionLedger:
 
         self._ensure_write_allowed()
         LedgerEnforcer().validate(dict(event or {}))
-        with self._lock:
+        backend_lock = self._backend._lock if type(self._backend) is InMemoryLedgerBackend else nullcontext()
+        with self._lock, backend_lock:
             self._ensure_backend_reconciled()
-            payload = deepcopy(dict(event or {}))
+            payload = _copy_ledger_value(dict(event or {}))
             if payload.get("type") == "TENANT_MEMORY_COMMITTED" and not self._tenant_memory_commit_depth:
                 raise WriteBoundaryViolationError("Tenant memory events must use commit_tenant_memory")
             cache = self._cache
             next_sequence = int(cache.get("sequence_counter") or 0) + 1
             identity, _ = self._apply_session_lineage(payload)
+            if payload.get("type") == "GRAPH_CHECKPOINT" and self._history_references_allowed():
+                from dadbot.core.session_state_codec import encode_session_state_update
+
+                checkpoint = dict(payload.get("payload") or {})
+                if not any(key in checkpoint for key in ("checkpoint_history_delta", "session_state_history_delta")):
+                    previous = dict(self._checkpoint_projections.get(identity, {}).get("payload") or {})
+                    roots = {"checkpoint", "session_state"}
+                    encoded = encode_session_state_update(previous, {
+                        key: value for key, value in checkpoint.items() if key in roots
+                    })
+                    checkpoint = {
+                        key: value for key, value in checkpoint.items() if key not in roots
+                    } | encoded["state"]
+                    if "state_history_delta" in encoded:
+                        for root, envelope in (
+                            ("checkpoint", "checkpoint_history_delta"),
+                            ("session_state", "session_state_history_delta"),
+                        ):
+                            fields = [
+                                field for field in encoded["state_history_delta"]["fields"] if field["path"][0] == root
+                            ]
+                            if fields:
+                                checkpoint[envelope] = {
+                                    "version": encoded["state_history_delta"]["version"], "fields": fields,
+                                }
+                    payload["payload"] = checkpoint
             self._seal_payload_hash_chain(payload, next_sequence)
+            session_projections = dict(self._session_state_projections)
+            self._project_session_event(payload, session_projections)
+            checkpoint_projections = dict(self._checkpoint_projections)
+            self._project_checkpoint_event(payload, checkpoint_projections)
             previous_digest = self._backend_content_digest
             self._backend_content_digest = None
             self._backend_uncertain = True
-            self._backend.append(
-                deepcopy(payload),
+            backend = self._backend
+            owns_input = (
+                type(backend) is InMemoryLedgerBackend
+                and getattr(backend.append, "__func__", None) is InMemoryLedgerBackend.append
+            )
+            backend.append(
+                payload if owns_input else _copy_ledger_value(payload),
                 committed=bool(payload.get("committed", False)),
             )
             digest = self._verified_append_digest(payload, previous_digest)
-            self._record_committed_event(payload, identity)
+            self._record_committed_event(
+                payload, identity, session_projections=session_projections,
+                checkpoint_projections=checkpoint_projections,
+            )
             self._backend_content_digest = digest
-            return deepcopy(payload)
+            return _copy_ledger_value(payload)
 
     def append(self, event: dict[str, Any]) -> dict[str, Any]:
         return self.write(event)
@@ -579,10 +697,10 @@ class ExecutionLedger:
                 ))
             )
             if not eligible:
-                return deepcopy(state_patch)
+                return _copy_ledger_value(state_patch)
             current = self._session_state_fields(tenant, session, frozenset(state_patch))
             return {
-                key: deepcopy(value) for key, value in state_patch.items()
+                key: _copy_ledger_value(value) for key, value in state_patch.items()
                 if key not in current or (
                     json.dumps(value, sort_keys=True, default=str)
                     != json.dumps(current[key], sort_keys=True, default=str)
@@ -592,32 +710,89 @@ class ExecutionLedger:
     def _session_state_fields(
         self, tenant_id: str, session_id: str, fields: frozenset[str],
     ) -> dict[str, Any]:
-        current: dict[str, Any] = {}
-        for event in self._events:
-            if (
-                str(event.get("tenant_id") or "").strip() != tenant_id
-                or str(event.get("session_id") or "default").strip() != session_id
-            ):
-                continue
-            payload = dict(event.get("payload") or {})
-            owner = str(payload.get("tenant_id") or "").strip()
-            if owner and owner != tenant_id:
-                raise ValueError("ledger event tenant does not match its payload")
-            event_type = event.get("type")
-            if event_type == "SESSION_STATE_UPDATED":
-                current.update({
-                    key: value for key, value in dict(payload.get("state") or {}).items() if key in fields
-                })
-            elif event_type == "SESSION_STATE_DELETED":
-                current.clear()
-            elif event_type == "JOB_COMPLETED" and "last_result" in fields:
-                current["last_result"] = payload.get("result")
-        return current
+        current = self._session_state_projections.get((tenant_id, session_id)) or {}
+        return {key: value for key, value in current.items() if key in fields}
 
-    def read(
+    def session_state_payload(
+        self, *, tenant_id: str, session_id: str, state_patch: dict[str, Any],
+    ) -> dict[str, Any]:
+        from dadbot.core.session_state_codec import encode_session_state_update
+        with self._lock:
+            self._ensure_backend_reconciled()
+            if not self._history_references_allowed():
+                return {"state": state_patch}
+            current = self._session_state_projections.get((tenant_id, session_id)) or {}
+            return encode_session_state_update(current, state_patch)
+
+    def _history_references_allowed(self) -> bool:
+        from dadbot_system.delegation import _execution_authority
+
+        backend = self._backend
+        if (
+                type(self) is not ExecutionLedger
+                or type(backend) not in (InMemoryLedgerBackend, FileWALLedgerBackend, CRCFileWALLedgerBackend)
+                or self._replay_filters or self._authenticated_authority_required
+                or _execution_authority.get() is not None
+                or self._backend_content_digest is None
+                or (
+                    type(backend) is not InMemoryLedgerBackend
+                    and (
+                        not backend._fsync_enabled
+                        or (type(backend) is FileWALLedgerBackend and backend._security_mode == "AUTHENTICATED")
+                    )
+                )
+        ):
+            return False
+        return type(backend) is not InMemoryLedgerBackend or (
+            self._backend_content_digest == backend._snapshot_token_unlocked()
+        )
+
+    def read_checkpoints(self, *, payload_trace_id: str | None = None) -> list[dict[str, Any]]:
+        """Return materialized checkpoint views, not replayable sealed event records."""
+        from dadbot.core.session_state_codec import apply_session_state_update
+
+        if getattr(self.read, "__func__", None) is not ExecutionLedger.read:
+            return self.read()
+        with self._lock:
+            events = self.read(event_types=frozenset({"GRAPH_CHECKPOINT"}), payload_trace_id=payload_trace_id)
+            cold: dict[str, dict[str, Any]] = {}
+            for event in events:
+                identity = (
+                    str(event.get("tenant_id") or "").strip(), str(event.get("session_id") or "default").strip(),
+                )
+                latest = self._checkpoint_projections.get(identity) or {}
+                if (
+                    latest.get("event_id") == event.get("event_id")
+                    and latest.get("wire_payload_hash") == _event_digest_record(event)["payload_hash"]
+                ):
+                    checkpoint_payload = latest["payload"]
+                else:
+                    if not cold:
+                        projections: dict[tuple[str, str], dict[str, Any]] = {}
+                        wanted = {str(item.get("event_id")) for item in events}
+                        for item in self._events:
+                            if item.get("type") == "GRAPH_CHECKPOINT":
+                                self._project_checkpoint_event(item, projections)
+                                key = (
+                                    str(item.get("tenant_id") or "").strip(),
+                                    str(item.get("session_id") or "default").strip(),
+                                )
+                                event_id = str(item.get("event_id"))
+                                if event_id in wanted:
+                                    cold[event_id] = projections[key]["payload"]
+                                if len(cold) == len(wanted):
+                                    break
+                    checkpoint_payload = cold[str(event.get("event_id"))]
+                event["payload"] = apply_session_state_update({}, {"state": checkpoint_payload})
+                for key in ("chain_hash", "event_sha256", "prev_chain_hash"):
+                    event.pop(key, None)
+            return events
+
+    def read(  # noqa: PLR0913
         self, full: bool = True, *,
         event_types: frozenset[str] | None = None, payload_types: frozenset[str] | None = None,
-        trace_id: str | None = None, job_id: str | None = None,
+        trace_id: str | None = None, job_id: str | None = None, payload_trace_id: str | None = None,
+        payload_fields: frozenset[str] | None = None,
     ) -> list[dict[str, Any]]:
         """Return isolated events; supplied trace/job identities select their union."""
         with self._lock:
@@ -626,6 +801,11 @@ class ExecutionLedger:
             events = self._events if full else list(self._cache.get("recent_tail") or [])
             if event_types is not None:
                 events = [event for event in events if event.get("type") in event_types]
+            if payload_trace_id is not None:
+                events = [
+                    event for event in events
+                    if str(dict(event.get("payload") or {}).get("trace_id") or "").strip() == payload_trace_id
+                ]
             if trace_id is not None or job_id is not None:
                 events = [
                     event for event in events
@@ -642,7 +822,17 @@ class ExecutionLedger:
                         key: value for key, value in event.items() if key != "payload"
                     } for event in events
                 ]
-            return deepcopy(events)
+            if payload_fields is not None:
+                events = [
+                    {
+                        **event,
+                        "payload": {
+                            key: value for key, value in dict(event.get("payload") or {}).items()
+                            if key in payload_fields
+                        },
+                    } for event in events
+                ]
+            return _copy_ledger_value(events)
 
     def replay_hash(self) -> str:
         events = [event for event in self.read() if str(event.get("type") or "") not in NON_REPLAY_EVENT_TYPES]
@@ -738,6 +928,8 @@ class ExecutionLedger:
                 )
 
     def load_from_backend(self, *, only_if_changed: bool = False) -> int:
+        from dadbot_system.delegation import _execution_authority
+
         with self._lock:
             if only_if_changed:
                 self._ensure_backend_reconciled()
@@ -745,8 +937,14 @@ class ExecutionLedger:
             digest = None
             if (
                 only_if_changed and not self._replay_filters
-                and isinstance(self._backend, (FileWALLedgerBackend, CRCFileWALLedgerBackend))
-                and type(self._backend) in (FileWALLedgerBackend, CRCFileWALLedgerBackend)
+                and (
+                    type(self._backend) in (FileWALLedgerBackend, CRCFileWALLedgerBackend)
+                    or (
+                        type(self) is ExecutionLedger and type(self._backend) is InMemoryLedgerBackend
+                        and not self._authenticated_authority_required
+                        and _execution_authority.get() is None
+                    )
+                )
             ):
                 digest, loaded = self._backend.load_if_changed(self._backend_content_digest)
                 if loaded is None:

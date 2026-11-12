@@ -1,6 +1,8 @@
 from __future__ import annotations
 
+import builtins
 import json
+import runpy
 import subprocess
 import sys
 from pathlib import Path
@@ -10,6 +12,28 @@ import pytest
 pytestmark = pytest.mark.unit
 
 ROOT = Path(__file__).resolve().parents[1]
+
+
+@pytest.mark.parametrize("as_main", [False, True])
+def test_legacy_harness_entrypoint_has_no_import_side_effects(monkeypatch: pytest.MonkeyPatch, as_main: bool) -> None:
+    calls: list[list[str]] = []
+    sentinel = object()
+    monkeypatch.setattr(builtins, "DadBot", sentinel, raising=False)
+
+    def run_tests(args: list[str]) -> int:
+        calls.append(args)
+        return 7
+
+    monkeypatch.setattr(pytest, "main", run_tests)
+    launcher = ROOT / "tests" / "test_phase4a_patched.py"
+    if as_main:
+        with pytest.raises(SystemExit) as exc:
+            runpy.run_path(str(launcher), run_name="__main__")
+        assert exc.value.code == 7
+    else:
+        runpy.run_path(str(launcher))
+    assert vars(builtins)["DadBot"] is sentinel
+    assert calls == ([[str(ROOT / "tests" / "test_phase4a.py")]] if as_main else [])
 
 
 def _run_python(code: str) -> subprocess.CompletedProcess[str]:

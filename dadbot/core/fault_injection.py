@@ -18,7 +18,7 @@ FaultBoundary:
 
 from __future__ import annotations
 
-import random
+import hashlib
 import secrets
 import time
 from collections import defaultdict
@@ -177,11 +177,11 @@ class RetryPolicy:
 
 
 class FaultInjector:
-    """Named failure-point registry for chaos-engineering and tests.
+    """Named failure points with reproducible, seeded probability sampling.
 
     Usage (tests â€” deterministic)::
 
-        injector = FaultInjector()
+        injector = FaultInjector(seed=42)
         injector.arm("ledger.append", count=1)
         with pytest.raises(RetryableError):
             injector.check("ledger.append")
@@ -193,8 +193,10 @@ class FaultInjector:
         injector.check("ledger.append")  # 1% chance of RetryableError
     """
 
-    def __init__(self) -> None:
+    def __init__(self, *, seed: int = 0) -> None:
         self._lock = RLock()
+        self._seed = int(seed)
+        self._sample_counts: dict[str, int] = defaultdict(int)
         self._armed: dict[str, int] = defaultdict(int)
         self._probability: dict[str, float] = {}
         self._exc_types: dict[str, type[Exception]] = {}
@@ -236,9 +238,13 @@ class FaultInjector:
                 self._triggered[name] += 1
                 raise exc_type(f"Fault injected at [{name}]")
             prob = self._probability.get(name, 0.0)
-            if prob > 0.0 and random.random() < prob:
-                self._triggered[name] += 1
-                raise exc_type(f"Probabilistic fault injected at [{name}]")
+            if prob > 0.0:
+                self._sample_counts[name] += 1
+                sample_key = f"{self._seed}\0{name}\0{self._sample_counts[name]}"
+                sample = int.from_bytes(hashlib.sha256(sample_key.encode("utf-8")).digest()[:8], "big")
+                if sample < prob * (1 << 64):
+                    self._triggered[name] += 1
+                    raise exc_type(f"Probabilistic fault injected at [{name}]")
 
     def triggered_count(self, name: str) -> int:
         with self._lock:
@@ -249,6 +255,7 @@ class FaultInjector:
             self._armed.clear()
             self._probability.clear()
             self._triggered.clear()
+            self._sample_counts.clear()
 
 
 _DEFAULT_INJECTOR = FaultInjector()

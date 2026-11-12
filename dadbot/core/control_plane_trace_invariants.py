@@ -3,6 +3,8 @@ from __future__ import annotations
 import logging
 from typing import Any
 
+from dadbot.core._control_plane_compaction import CompactionMixin
+from dadbot.core.execution_ledger import ExecutionLedger
 from dadbot.core.runtime_errors import InvariantViolation
 
 
@@ -62,7 +64,16 @@ def _validate_trace_invariant_impl(
         logger.warning("Trace invariant violation: missing trace_id in job %s", job.job_id)
         return
 
-    trace_events = control_plane._job_trace_events(job)
+    read_events = control_plane._job_trace_events
+    trace_events = (
+        read_events(job, payload_fields=frozenset({"event_type", "stage", "node_type"}))
+        if (
+            getattr(read_events, "__func__", None) is CompactionMixin._job_trace_events
+            and type(control_plane.ledger) is ExecutionLedger
+            and getattr(control_plane.ledger.read, "__func__", None) is ExecutionLedger.read
+        )
+        else read_events(job)
+    )
     if not trace_events:
         logger.warning("Trace invariant violation: no events recorded for trace %s", trace_id)
         return

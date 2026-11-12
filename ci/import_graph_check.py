@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 import ast
-from collections.abc import Iterable
+from collections.abc import Collection, Iterable
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -52,14 +52,30 @@ class Violation:
     detail: str
 
 
+def iter_python_files(
+    root: Path,
+    *,
+    excluded_dirs: Collection[str],
+    included_top_level_dirs: Collection[str],
+) -> Iterable[Path]:
+    def raise_walk_error(error: OSError) -> None:
+        raise error
+
+    for directory, subdirs, filenames in root.walk(on_error=raise_walk_error):
+        subdirs[:] = sorted(
+            name for name in subdirs
+            if name not in excluded_dirs and not name.startswith(".venv")
+            and (directory != root or name in included_top_level_dirs)
+        )
+        for name in sorted(filenames):
+            if name not in excluded_dirs and not name.startswith(".venv") and Path(name).match("*.py"):
+                yield directory / name
+
+
 def _iter_python_files() -> Iterable[Path]:
-    for path in ROOT.rglob("*.py"):
-        rel = path.relative_to(ROOT)
-        if any(part in EXCLUDED_DIR_NAMES or part.startswith(".venv") for part in rel.parts):
-            continue
-        if len(rel.parts) > 1 and rel.parts[0] not in INCLUDED_TOP_LEVEL_DIRS:
-            continue
-        yield path
+    return iter_python_files(
+        ROOT, excluded_dirs=EXCLUDED_DIR_NAMES, included_top_level_dirs=INCLUDED_TOP_LEVEL_DIRS,
+    )
 
 
 def _rel(path: Path) -> str:

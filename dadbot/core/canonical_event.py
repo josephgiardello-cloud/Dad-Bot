@@ -46,6 +46,7 @@ NON_CANONICAL_PAYLOAD_FIELDS: frozenset[str] = frozenset(
         "elapsed_ms",
         "execution_timestamp_ms",
         "checkpoint",
+        "checkpoint_history_delta",
         "identity",
         "execution_trace_contract",
         "leaf_hash",

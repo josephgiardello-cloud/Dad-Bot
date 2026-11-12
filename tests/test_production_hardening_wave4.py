@@ -526,6 +526,34 @@ class TestTransactionalAtomicity:
 
 
 class TestFaultInjector:
+    def test_probabilistic_faults_are_seeded_and_independent_per_point(self):
+        def triggered(injector, name):
+            try:
+                injector.check(name)
+            except RetryableError:
+                return True
+            return False
+
+        first = FaultInjector(seed=42)
+        second = FaultInjector(seed=42)
+        other_seed = FaultInjector(seed=43)
+        for injector in (first, second, other_seed):
+            injector.register("target", probability=0.5)
+        second.register("noise", probability=0.5)
+
+        expected = [triggered(first, "target") for _ in range(64)]
+        observed = []
+        for _ in range(64):
+            triggered(second, "noise")
+            observed.append(triggered(second, "target"))
+        assert observed == expected
+        assert any(expected) and not all(expected)
+        assert [triggered(other_seed, "target") for _ in range(64)] != expected
+
+        first.reset()
+        first.register("target", probability=0.5)
+        assert [triggered(first, "target") for _ in range(64)] == expected
+
     def test_registered_certain_probability_triggers(self):
         inj = FaultInjector()
         inj.register("certain", probability=1.0)

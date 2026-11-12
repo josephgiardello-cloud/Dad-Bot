@@ -1989,17 +1989,34 @@ class ExecutionControlPlane(ReconciliationMixin, CompactionMixin):
         trace_token: str,
         tenant_id: str,
     ) -> dict[str, Any]:
+        from dadbot.core.ledger_backend import InMemoryLedgerBackend
+
         sid = str(session_id)
         try:
             persisted_patch = json.loads(json.dumps(dict(state_patch or {}), default=str))
         except (TypeError, ValueError, RecursionError) as exc:
             raise RuntimeError("session state is not serializable for ledger persistence") from exc
-        with self.ledger._lock:
+        backend = self.ledger._backend
+        with self.ledger._lock, (
+            backend._lock if type(backend) is InMemoryLedgerBackend else contextlib.nullcontext()
+        ):
             if (
                 type(self.ledger) is ExecutionLedger
+                and type(self.ledger._backend) is not InMemoryLedgerBackend
                 and getattr(self.ledger.session_state_delta, "__func__", None) is ExecutionLedger.session_state_delta
             ):
                 persisted_patch = self.ledger.session_state_delta(
+                    tenant_id=tenant_id, session_id=sid, state_patch=persisted_patch,
+                )
+            persisted_payload = {"state": persisted_patch}
+            if (
+                type(self.ledger) is ExecutionLedger
+                and (
+                    getattr(self.ledger.session_state_payload, "__func__", None)
+                    is ExecutionLedger.session_state_payload
+                )
+            ):
+                persisted_payload = self.ledger.session_state_payload(
                     tenant_id=tenant_id, session_id=sid, state_patch=persisted_patch,
                 )
             self.ledger_writer.write_event(
@@ -2008,7 +2025,7 @@ class ExecutionControlPlane(ReconciliationMixin, CompactionMixin):
                 tenant_id=tenant_id,
                 step_key="control_plane.merge_session_state",
                 trace_token=str(trace_token or ""),
-                payload={"tenant_id": tenant_id, "state": persisted_patch},
+                payload={"tenant_id": tenant_id, **persisted_payload},
                 committed=True,
             )
         patch = dict(state_patch or {})
