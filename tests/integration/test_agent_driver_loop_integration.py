@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+from types import SimpleNamespace
 
 import pytest
 
@@ -20,6 +21,7 @@ class _CyclingKernel:
     """Cycles through (reply, should_end) pairs, then returns empty."""
 
     def __init__(self, turns: list[tuple[str, bool]]) -> None:
+        self.config = SimpleNamespace(tenant_id="t1_" + "a" * 26)
         self._turns = list(turns)
         self._idx = 0
         self.calls: list[str] = []

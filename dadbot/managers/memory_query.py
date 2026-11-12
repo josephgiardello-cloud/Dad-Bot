@@ -361,7 +361,7 @@ class MemoryQueryManager:
         return [entry for _, entry in ranked[: max(1, int(limit or 2))]]
 
     def relevant_memories_for_input(
-        self, user_input, limit=5, graph_result=None, *, from_date=None, to_date=None,
+        self, user_input, limit=5, graph_result=None, *, from_date=None, to_date=None, record_access=True,
     ):
         bounds = []
         for name, value in (("from_date", from_date), ("to_date", to_date)):
@@ -539,7 +539,8 @@ class MemoryQueryManager:
         top_score = selected_scores[0] if selected_scores else 0.0
         second_score = selected_scores[1] if len(selected_scores) > 1 else 0.0
         stage_start = perf_counter()
-        self._record_memory_access_signals(selected, catalog)
+        if record_access:
+            self._record_memory_access_signals(selected, catalog)
         stage_seconds["access_update"] = perf_counter() - stage_start
         self.bot._last_memory_retrieval_diagnostics = {
             "retrieved_count": len(selected),

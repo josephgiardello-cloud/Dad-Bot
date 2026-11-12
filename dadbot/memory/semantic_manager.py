@@ -16,7 +16,11 @@ from threading import local
 
 import ollama
 
+from dadbot.core.ledger_backend import WALCorruptionError
+from dadbot.core.tenant_memory_ledger import TenantMemoryLedgerCorruption
 from dadbot.utils import json_dumps, json_loads
+from dadbot_system.delegation import AuthorityUnavailableError
+from dadbot_system.security import AuthorizationError
 from dadbot_system.semantic_index import PGVectorSemanticIndex, SQLiteSemanticIndex
 
 logger = logging.getLogger(__name__)
@@ -99,7 +103,10 @@ class SemanticIndexManager:
         if not callable(local_backend) or local_backend() is None:
             yield True
             return
-        catalog = list(manager.memory_projection().get("memories") or [])
+        committed = storage.committed_tenant_projection()
+        if committed is None:
+            raise TenantMemoryLedgerCorruption("Committed tenant memory is unavailable during semantic recall")
+        catalog = list(committed.get("memories") or [])
         by_key = self.semantic_memory_lookup(catalog)
         if any(by_key.get(self.semantic_memory_key(memory)) != memory for memory in memories):
             yield False
@@ -899,19 +906,19 @@ class SemanticIndexManager:
         if not memories:
             return []
 
+        manager = self._bot.memory_manager
         self._last_retrieval_status = {"index_pending": False, "degraded": False}
-        self.queue_semantic_memory_index(memories)
         with self._bot._semantic_index_lock:
             future = self._bot._semantic_index_future
             self._last_retrieval_status["index_pending"] = bool(future and not future.done())
 
-        query_context = self.semantic_query_context(query, limit)
+        query_context = manager.semantic_query_context(query, limit)
         if query_context is None:
             self._last_retrieval_status["degraded"] = True
             self._last_retrieval_status["reason"] = "embedding_unavailable"
             return []
 
-        current_memories = self.semantic_memory_lookup(memories)
+        current_memories = manager.semantic_memory_lookup(memories)
         try:
             candidate_limit = self._bot.runtime_config.memory_candidate_limit
             with self.verified_semantic_index_read(memories) as current:
@@ -928,8 +935,10 @@ class SemanticIndexManager:
                     )
                     self._last_retrieval_status["bounded"] = True
                 else:
-                    rows = self.catalog_semantic_rows(current_memories.keys())
+                    rows = manager.catalog_semantic_rows(current_memories.keys())
                     self._last_retrieval_status["bounded"] = False
+        except (AuthorizationError, AuthorityUnavailableError, WALCorruptionError, TenantMemoryLedgerCorruption):
+            raise
         except Exception as exc:
             logger.warning("Semantic memory lookup failed: %s", exc)
             self._last_retrieval_status["degraded"] = True
@@ -943,7 +952,7 @@ class SemanticIndexManager:
         recent_topics = self._bot.recent_memory_topics(limit=4)
         mood_trend = self._bot.current_memory_mood_trend()
         scored = []
-        for similarity, memory in self.score_semantic_rows(
+        for similarity, memory in manager.score_semantic_rows(
             rows,
             current_memories,
             query_context["query_embedding"],

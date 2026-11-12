@@ -148,7 +148,10 @@ def require_tenant_authority(tenant_id: str) -> None:
 
 
 def require_tenant_authority_if_active(tenant_id: str, *, required: bool = False) -> None:
-    if required or _execution_authority.get() is not None or _runtime_authority.get() is not None:
+    if (
+        required or _live_effect_authority_required.get()
+        or _execution_authority.get() is not None or _runtime_authority.get() is not None
+    ):
         require_tenant_authority(tenant_id)
 
 

@@ -301,7 +301,7 @@ class AssistantRuntime:
         observation_hook: Any | None = None,
         enable_semantic_memory: bool = True,
         semantic_top_k: int = 3,
-        semantic_sync_index: bool = True,
+        semantic_sync_index: bool = False,
     ) -> DriverLoopResult:
         loop_policy = policy or DriverLoopPolicy()
         tool_names = (

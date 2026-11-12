@@ -36,6 +36,7 @@ class _FakeOrchestration:
 
 class _FakeKernel:
     def __init__(self) -> None:
+        self.config = SimpleNamespace(tenant_id="t1_" + "a" * 26)
         self._last_turn_pipeline = {"phase": "done"}
         self._last_planner_debug = {"tool_calls": ["memory_lookup"]}
         self._last_memory_context_stats = {"tokens": 123}
@@ -79,6 +80,7 @@ class _FakeKernel:
             read=lambda: [
                 {
                     "event_id": "e1",
+                    "tenant_id": self.config.tenant_id,
                     "session_id": "default",
                     "type": "JOB_COMPLETED",
                     "payload": {"summary": "Discussed tomato garden plan"},
@@ -91,7 +93,7 @@ class _FakeKernel:
     def process_user_message(self, message: str):
         return (f"echo::{message}", True)
 
-    def _relevant_memories(self, query: str, limit: int = 5):
+    def _relevant_memories(self, query: str, limit: int = 5, *, record_access: bool = True):
         self.hybrid_memory_queries.append((query, limit))
         return [{"summary": query, "limit": limit}]
 

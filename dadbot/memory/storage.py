@@ -200,11 +200,11 @@ class MemoryStorageBackend:
     """
 
     def __init__(self, bot, manager) -> None:
-        from dadbot_system.delegation import _execution_authority
+        from dadbot_system.delegation import live_authority_audit_context
 
         self.bot = bot
         self._manager = manager
-        self._authenticated_authority_required = _execution_authority.get() is not None
+        self._authenticated_authority_required = live_authority_audit_context()["authority_mode"] != "trusted_local"
         self._projected_store: dict[str, object] = {}
         self._tenant_base_revision: int | None = None
         self._tenant_recovery_required = False
@@ -214,10 +214,11 @@ class MemoryStorageBackend:
         self._authenticated_authority_required = True
 
     def _authorize_tenant_memory(self) -> None:
-        from dadbot_system.delegation import _execution_authority, require_tenant_authority
+        from dadbot_system.delegation import require_tenant_authority_if_active
 
-        if self._authenticated_authority_required or _execution_authority.get() is not None:
-            require_tenant_authority(self.bot.config.tenant_id)
+        require_tenant_authority_if_active(
+            self.bot.config.tenant_id, required=self._authenticated_authority_required,
+        )
 
     def _local_authority_backend(self):
         from dadbot.core.ledger_backend import FileWALLedgerBackend

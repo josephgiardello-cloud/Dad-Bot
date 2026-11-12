@@ -1,7 +1,7 @@
 # Agent and Memory Hardening Plan
 
 Date: 2026-11-11  
-Status: Milestone 0 verified for the default local suite; milestone 1 is next.
+Status: Milestone 0 verified for the default local suite; milestone 1 is in progress.
 
 ## Goal
 
@@ -30,7 +30,7 @@ product.
 
 ### Validation status
 
-The unfiltered default suite passed on November 12, 2026: **4,659 passed,
+The unfiltered default suite at `d02ac36d` passed on November 12, 2026: **4,659 passed,
 123 skipped, 10 expected failures, zero failures**. Test deadlines and production
 authority checks are unchanged.
 
@@ -138,10 +138,9 @@ skips are not passes.
 - Trace actual ingress into memory recall, index synchronization, consolidation,
   snapshot load/restore, and proactive workers. Build a supported-path matrix
   before adding metadata or adapters.
-- Examine bridge event selection: [MemoryIndexer](../dadbot/runtime/semantic_memory_bridge.py)
-  currently filters by session and has no explicit tenant field. Determine what
-  the real reader guarantees; require tenant-bound reads instead of relying on
-  matching session strings.
+- Keep [MemoryIndexer](../dadbot/runtime/semantic_memory_bridge.py) bound to an
+  explicit tenant. Filter canonical tenant/session identity before limiting
+  events, even when the underlying reader returns several tenants.
 - Audit the bridge's index synchronization against committed catalog fences.
   Observation must stay read-only; indexing/repair belongs behind committed-state
   authority, not arbitrary event materialization.
@@ -168,6 +167,36 @@ tenant's committed state; corrupt authority never falls back to staged state.
 
 Extend existing authority, tenant-memory, local-mutation, projection-status, and
 loop-resume tests rather than duplicating their coverage.
+
+### Supported-path status
+
+| Path | Authority boundary | Status |
+| --- | --- | --- |
+| Loop observation | Tenant-bound provider, committed memory/insight catalogs, verified semantic read fence | Implemented; does not publish access updates or schedule index repair |
+| Explicit semantic repair | Committed catalog and existing tenant revision/publication fences | Implemented; empty catalogs clear obsolete rows; failures propagate |
+| Ledger recall fallback | Live authority and canonical tenant/session filtering before the event limit | Implemented |
+| Projection recovery | Existing ledger-backed projection status and tenant-qualified indexes | Existing coverage retained; metadata completeness and adapter certification remain open |
+| Loop snapshots | Currently session-named JSON files, outside production AssistantRuntime wiring | Tenant ownership, corruption handling, and committed-progress binding remain open |
+| Executive startup tasks | Currently a global markdown task reader | Tenant ownership remains open |
+
+Observation providers pass `record_access=False` to hybrid retrieval; custom
+hybrid adapters must accept that keyword. Ordinary retrieval retains access
+recording by default. `semantic_sync_index=True` explicitly requests repair from
+the committed catalog; the loop default is false. Reflection reads consolidated
+facts through `consolidated_memory_catalog()`, not the mutation-capable
+`consolidated_memories()` accessor.
+
+Semantic lookup propagates authorization, unavailable-authority, and corrupt
+ledger errors. Captured authenticated providers cannot downgrade to trusted-local
+access when their authority context disappears, and retained contexts recheck
+membership after revocation. These repairs do not complete milestone 1.
+
+Targeted validation: **324 passed, 13 slow/stress tests skipped** across authority,
+recall, recovery, isolation, and architecture checks. The unchanged scale gates
+passed in 101.21 s / 120 s, 13.41 s / 60 s, and 5.51 s / 30 s. The full suite was
+not rerun for this repair group. Changed-file syntax/import lint checks pass;
+overall lint remains non-clean, including argument-count and complexity
+diagnostics on the extended retrieval API.
 
 ## 2. Certify memory-first observation
 

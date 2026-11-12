@@ -1,11 +1,5 @@
 from __future__ import annotations
 
-import logging
-
-from dadbot_system.semantic_index import PGVectorSemanticIndex
-
-logger = logging.getLogger(__name__)
-
 
 class MemorySearchMixin:
     """Semantic/search delegation mixin focused on deterministic retrieval flow."""
@@ -119,82 +113,4 @@ class MemorySearchMixin:
         )
 
     def semantic_memory_matches(self, query, memories, limit=3):
-        # Search path must remain read-only: retrieval only, no catalog/index mutation.
-        if not memories:
-            return []
-
-        status = {"index_pending": False, "degraded": False}
-        self._semantic_manager._last_retrieval_status = status
-        with self.bot._semantic_index_lock:
-            future = self.bot._semantic_index_future
-            status["index_pending"] = bool(future and not future.done())
-        query_context = self.semantic_query_context(query, limit)
-        if query_context is None:
-            status.update(degraded=True, reason="embedding_unavailable")
-            return []
-
-        current_memories = self.semantic_memory_lookup(memories)
-        backend = self._semantic_manager._semantic_index_backend
-        candidate_limit = self.bot.runtime_config.memory_candidate_limit
-        try:
-            with self._semantic_manager.verified_semantic_index_read(memories) as current:
-                if not current:
-                    status.update(degraded=True, reason="stale_index")
-                    return []
-                if candidate_limit > 0 and len(current_memories) > candidate_limit and isinstance(
-                    backend, PGVectorSemanticIndex,
-                ):
-                    rows = backend.fetch_nearest_by_keys(
-                        current_memories.keys(), query_context["query_embedding"], candidate_limit,
-                    )
-                    status["bounded"] = True
-                else:
-                    rows = self.catalog_semantic_rows(current_memories.keys())
-                    status["bounded"] = False
-        except Exception as exc:
-            logger.warning("Semantic memory lookup failed: %s", exc)
-            status.update(degraded=True, reason="semantic_lookup_failed")
-            return []
-        status["candidate_count"] = len(rows)
-        if not status["bounded"] and len(rows) < len(current_memories):
-            status.update(degraded=True, reason="incomplete_index")
-
-        recent_topics = self.bot.recent_memory_topics(limit=4)
-        mood_trend = self.bot.current_memory_mood_trend()
-        scored = []
-        for similarity, memory in self.score_semantic_rows(
-            rows,
-            current_memories,
-            query_context["query_embedding"],
-        ):
-            freshness = self.bot.semantic_memory_freshness_weight(memory)
-            alignment = self.bot.memory_alignment_weight(
-                memory,
-                query_tokens=query_context["query_tokens"],
-                query_category=query_context["query_category"],
-                query_mood=query_context["query_mood"],
-                recent_topics=recent_topics,
-                mood_trend=mood_trend,
-            )
-            if alignment <= 0:
-                continue
-            score = similarity * 5.0 * freshness * alignment
-            impact_bonus = min(
-                1.5,
-                max(0.0, self.bot.memory_impact_score(memory)) * 0.35,
-            )
-            if score > 0:
-                score += impact_bonus
-            if score > 0.1:
-                scored.append((round(score, 4), memory))
-
-        ranked = sorted(
-            scored,
-            key=lambda item: (
-                item[0],
-                item[1].get("updated_at", ""),
-                item[1].get("summary", ""),
-            ),
-            reverse=True,
-        )
-        return self.bot.select_diverse_ranked_memories(ranked, limit)
+        return self._semantic_manager.semantic_memory_matches(query, memories, limit=limit)

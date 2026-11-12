@@ -169,11 +169,16 @@ class MemoryLifecycleManager:
             self._manager.mutate_memory_store(memory_graph=graph)
         return graph
 
+    def _committed_catalog(self, name):
+        committed = self._manager._storage.committed_tenant_projection()
+        projection = committed if committed is not None else self._manager.memory_projection()
+        return deepcopy(projection.get(name, []))
+
     def memory_catalog(self):
-        raw_memories = self.bot.MEMORY_STORE.get("memories", [])
-        normalized_memories = deepcopy(raw_memories)
-        self._manager.queue_semantic_memory_index(normalized_memories)
-        return normalized_memories
+        return self._committed_catalog("memories")
+
+    def consolidated_memory_catalog(self):
+        return self._committed_catalog("consolidated_memories")
 
     def last_saved_mood(self):
         return self.bot.normalize_mood(self.bot.MEMORY_STORE.get("last_mood"))

@@ -121,6 +121,7 @@ class SupportsMemoryRetrieval(Protocol):
         *,
         from_date: str | None = None,
         to_date: str | None = None,
+        record_access: bool = True,
     ) -> list[dict[str, Any]]: ...
 
 
