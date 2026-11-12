@@ -25,7 +25,7 @@ def _required_files() -> list[Path]:
         ROOT / "dadbot" / "core" / "capability_registry.py",
         ROOT / "dadbot" / "core" / "execution_receipt.py",
         ROOT / "dadbot" / "core" / "observability.py",
-        ROOT / "dadbot" / "core" / "otel_bridge.py",
+        ROOT / "dadbot" / "telemetry" / "otel_bridge.py",
         ROOT / "dadbot" / "core" / "prometheus_bridge.py",
         ROOT / "tools" / "phase4_certify.py",
     ]
@@ -93,8 +93,8 @@ async def _runtime_checks() -> dict[str, Any]:
     from dadbot.core.control_plane import ExecutionControlPlane, SessionRegistry
     from dadbot.core.replay_verifier import ReplayVerifier
 
-    async def _noop_executor(_session: dict[str, Any], _job):
-        return {"reply": "ok", "should_end": False, "checkpoint_hash": "chk"}
+    async def _noop_executor(_session: dict[str, Any], _job) -> tuple[str, bool]:
+        return "ok", False
 
     plane = ExecutionControlPlane(registry=SessionRegistry(), kernel_executor=_noop_executor)
     await plane.submit_turn(session_id="audit-session", user_input="hello")
@@ -117,7 +117,7 @@ def _observability_checks() -> dict[str, Any]:
     exporter = EventStreamExporter(sink=sink.append, enabled=True, min_level=TraceLevel.MINIMAL, sample_rate=0.0)
     exporter.export({"event": "audit.probe"}, level=TraceLevel.AUDIT)
 
-    otel_present = (ROOT / "dadbot" / "core" / "otel_bridge.py").exists()
+    otel_present = (ROOT / "dadbot" / "telemetry" / "otel_bridge.py").exists()
     prom_present = (ROOT / "dadbot" / "core" / "prometheus_bridge.py").exists()
 
     return {

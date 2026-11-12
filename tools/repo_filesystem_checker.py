@@ -16,7 +16,7 @@ EXPECTED_CRITICAL_FILES = [
     "dadbot/core/capability_registry.py",
     "dadbot/core/execution_receipt.py",
     "dadbot/core/observability.py",
-    "dadbot/core/otel_bridge.py",
+    "dadbot/telemetry/otel_bridge.py",
     "dadbot/core/prometheus_bridge.py",
     "tools/phase4_certify.py",
     "tools/repo_phase4_auditor.py",

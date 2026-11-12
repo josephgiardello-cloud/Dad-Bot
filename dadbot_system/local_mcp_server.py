@@ -4,6 +4,7 @@ import ast
 import asyncio
 import atexit
 import fnmatch
+import hashlib
 import html
 import json
 import logging
@@ -11,14 +12,24 @@ import os
 import pathlib
 import re
 import webbrowser
+from collections.abc import Iterator
+from contextlib import contextmanager
 from datetime import datetime
 from functools import wraps
 from typing import Any
 from urllib.parse import quote_plus, urlparse
 from urllib.request import Request, urlopen
+from uuid import uuid4
 
 from Dad import DadBot
+from dadbot.core.durability import FileLockMutex
 
+from .delegation import (
+    live_authority_audit_context,
+    require_tenant_authority_if_active,
+    tenant_mutation_fence,
+)
+from .execution_identity import require_scoped_tenant_id
 from .mcp_security import (
     MCP_CONNECT_SCOPE,
     MCP_RESOURCE_TO_TOOL,
@@ -238,12 +249,10 @@ def _safe_read_text(path: pathlib.Path, *, max_chars: int = 120_000) -> str:
     return path.read_text(encoding="utf-8", errors="replace")[: max(1, int(max_chars or 1))]
 
 
-def _task_file_path() -> pathlib.Path:
-    target = _project_root() / "session_logs" / "executive_tasks.md"
-    target.parent.mkdir(parents=True, exist_ok=True)
-    if not target.exists():
-        target.write_text("# Dad-Bot Executive Tasks\n\n", encoding="utf-8")
-    return target
+def _task_file_path(tenant_id: str) -> pathlib.Path:
+    tenant = require_scoped_tenant_id(tenant_id)
+    owner_key = hashlib.sha256(tenant.encode("utf-8")).hexdigest()
+    return _project_root() / "session_logs" / f"executive_tasks.{owner_key}.md"
 
 
 def _parse_due_iso(due_text: str) -> str:
@@ -259,16 +268,38 @@ def _parse_due_iso(due_text: str) -> str:
         return ""
 
 
-def _load_markdown_tasks(path: pathlib.Path) -> list[dict[str, Any]]:
-    lines = path.read_text(encoding="utf-8", errors="replace").splitlines()
+def _load_markdown_tasks(path: pathlib.Path, *, tenant_id: str) -> list[dict[str, Any]]:
+    from .security import AuthorizationError
+
+    tenant = require_scoped_tenant_id(tenant_id)
+    require_tenant_authority_if_active(tenant)
+    try:
+        lines = path.read_text(encoding="utf-8").splitlines()
+    except FileNotFoundError:
+        require_tenant_authority_if_active(tenant)
+        if (_project_root() / "session_logs" / "executive_tasks.md").exists():
+            logger.warning(
+                "Unowned legacy executive tasks are excluded; explicit tenant assignment is required for migration",
+            )
+        return []
+    if len(lines) < 2 or lines[1] != f"<!-- tenant_id:{tenant} -->":
+        raise AuthorizationError("Executive task board ownership is missing or mismatched")
+    if lines[0] != "# Dad-Bot Executive Tasks":
+        raise ValueError("Invalid executive task board header")
     tasks: list[dict[str, Any]] = []
     pattern = re.compile(
         r"^- \[(?P<done>[ xX])\] (?P<title>.*?) \{id:(?P<id>[A-Za-z0-9_-]+), due:(?P<due>[^,]*), pri:(?P<pri>[^}]*)\}$"
     )
-    for line in lines:
+    task_ids: set[str] = set()
+    for line in lines[2:]:
+        if not line.strip():
+            continue
         match = pattern.match(line.strip())
         if not match:
-            continue
+            raise ValueError("Invalid executive task row")
+        if match.group("id") in task_ids:
+            raise ValueError("Duplicate executive task ID")
+        task_ids.add(match.group("id"))
         tasks.append(
             {
                 "id": match.group("id"),
@@ -278,24 +309,53 @@ def _load_markdown_tasks(path: pathlib.Path) -> list[dict[str, Any]]:
                 "done": match.group("done").lower() == "x",
             }
         )
+    require_tenant_authority_if_active(tenant)
     return tasks
 
 
-def _write_markdown_tasks(path: pathlib.Path, tasks: list[dict[str, Any]]) -> None:
-    header = ["# Dad-Bot Executive Tasks", ""]
+def _write_markdown_tasks(path: pathlib.Path, tasks: list[dict[str, Any]], *, tenant_id: str) -> None:
+    tenant = require_scoped_tenant_id(tenant_id)
+    require_tenant_authority_if_active(tenant)
+    if path != _task_file_path(tenant):
+        raise ValueError("Executive task writes require the tenant-qualified board path")
+    _load_markdown_tasks(path, tenant_id=tenant)
+    header = ["# Dad-Bot Executive Tasks", f"<!-- tenant_id:{tenant} -->", ""]
     body = []
     for task in tasks:
+        values = {name: str(task.get(name) or "") for name in ("id", "title", "due", "priority")}
+        if any(value != "".join(value.splitlines()) for value in values.values()):
+            raise ValueError("Executive task fields must be single-line")
         done_marker = "x" if bool(task.get("done")) else " "
         body.append(
-            f"- [{done_marker}] {str(task.get('title') or '').strip()} "
-            f"{{id:{str(task.get('id') or '')}, due:{str(task.get('due') or '')}, pri:{str(task.get('priority') or 'normal')}}}"
+            f"- [{done_marker}] {values['title'].strip()} "
+            f"{{id:{values['id']}, due:{values['due']}, pri:{values['priority'] or 'normal'}}}"
         )
-    path.write_text("\n".join(header + body) + "\n", encoding="utf-8")
+    path.parent.mkdir(parents=True, exist_ok=True)
+    temporary = path.with_name(f".{path.name}.{uuid4().hex}.tmp")
+    try:
+        with temporary.open("w", encoding="utf-8") as handle:
+            handle.write("\n".join(header + body) + "\n")
+            handle.flush()
+            os.fsync(handle.fileno())
+        _load_markdown_tasks(temporary, tenant_id=tenant)
+        require_tenant_authority_if_active(tenant)
+        os.replace(temporary, path)
+    finally:
+        temporary.unlink(missing_ok=True)
 
 
-def get_pending_executive_tasks(*, limit: int = 8) -> list[dict[str, Any]]:
-    path = _task_file_path()
-    tasks = _load_markdown_tasks(path)
+@contextmanager
+def _executive_task_update(tenant_id: str) -> Iterator[tuple[pathlib.Path, list[dict[str, Any]]]]:
+    tenant = require_scoped_tenant_id(tenant_id)
+    require_tenant_authority_if_active(tenant)
+    required = live_authority_audit_context()["authority_mode"] != "trusted_local"
+    with tenant_mutation_fence(tenant, required=required):
+        path = _task_file_path(tenant)
+        with FileLockMutex(path.with_suffix(".md.lock")).locked():
+            yield path, _load_markdown_tasks(path, tenant_id=tenant)
+
+
+def _pending_executive_tasks(tasks: list[dict[str, Any]]) -> list[dict[str, Any]]:
     pending = [task for task in tasks if not bool(task.get("done"))]
     pending.sort(
         key=lambda task: (
@@ -304,7 +364,12 @@ def get_pending_executive_tasks(*, limit: int = 8) -> list[dict[str, Any]]:
             str(task.get("id") or ""),
         )
     )
-    return pending[: max(1, int(limit or 1))]
+    return pending
+
+
+def get_pending_executive_tasks(*, tenant_id: str, limit: int = 8) -> list[dict[str, Any]]:
+    tasks = _load_markdown_tasks(_task_file_path(tenant_id), tenant_id=tenant_id)
+    return _pending_executive_tasks(tasks)[: max(1, int(limit or 1))]
 
 
 def _persist_research_memory(runtime_bot: DadBot, *, url: str, preview: str) -> dict[str, Any]:
@@ -808,9 +873,8 @@ def build_server(bot: DadBot | None = None, *, authority: MCPToolAuthority | Non
             raise ValueError("title must not be empty")
         normalized_priority = str(priority or "normal").strip().lower() or "normal"
         due_iso = _parse_due_iso(due_text)
-        task_id = datetime.now().strftime("tsk%Y%m%d%H%M%S")
-        path = _task_file_path()
-        tasks = _load_markdown_tasks(path)
+        tenant = require_scoped_tenant_id(_get_bot(bot).config.tenant_id)
+        task_id = f"tsk{uuid4().hex}"
         task = {
             "id": task_id,
             "title": normalized_title,
@@ -818,20 +882,21 @@ def build_server(bot: DadBot | None = None, *, authority: MCPToolAuthority | Non
             "priority": normalized_priority,
             "done": False,
         }
-        tasks.append(task)
-        _write_markdown_tasks(path, tasks[-400:])
+        with _executive_task_update(tenant) as (path, tasks):
+            tasks.append(task)
+            _write_markdown_tasks(path, tasks[-400:], tenant_id=tenant)
         return {"stored": True, "task": task, "path": str(path.relative_to(_project_root()))}
 
     @authorized_tool
     def executive_list_tasks(status: str = "open", limit: int = 20) -> dict[str, Any]:
         """List executive tasks from markdown board."""
         normalized_status = str(status or "open").strip().lower()
-        path = _task_file_path()
-        tasks = _load_markdown_tasks(path)
+        tenant = require_scoped_tenant_id(_get_bot(bot).config.tenant_id)
+        path = _task_file_path(tenant)
+        tasks = _load_markdown_tasks(path, tenant_id=tenant)
         if normalized_status == "open":
-            open_tasks = [task for task in tasks if not task.get("done")]
-            filtered = get_pending_executive_tasks(limit=max(1, int(limit or 1)))
-            total_count = len(open_tasks)
+            filtered = _pending_executive_tasks(tasks)
+            total_count = len(filtered)
         elif normalized_status == "done":
             filtered = [task for task in tasks if task.get("done")]
             total_count = len(filtered)
@@ -851,16 +916,16 @@ def build_server(bot: DadBot | None = None, *, authority: MCPToolAuthority | Non
         normalized_id = str(task_id or "").strip()
         if not normalized_id:
             raise ValueError("task_id must not be empty")
-        path = _task_file_path()
-        tasks = _load_markdown_tasks(path)
-        updated = False
-        for task in tasks:
-            if str(task.get("id") or "") == normalized_id:
-                task["done"] = True
-                updated = True
-                break
-        if updated:
-            _write_markdown_tasks(path, tasks)
+        tenant = require_scoped_tenant_id(_get_bot(bot).config.tenant_id)
+        with _executive_task_update(tenant) as (path, tasks):
+            updated = False
+            for task in tasks:
+                if str(task.get("id") or "") == normalized_id:
+                    task["done"] = True
+                    updated = True
+                    break
+            if updated:
+                _write_markdown_tasks(path, tasks, tenant_id=tenant)
         return {"task_id": normalized_id, "completed": updated, "path": str(path.relative_to(_project_root()))}
 
     if hasattr(server, "resource"):

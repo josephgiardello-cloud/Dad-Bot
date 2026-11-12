@@ -77,23 +77,24 @@ def test_dad_streamlit_app_starts_without_streamlit_exceptions(tmp_path):
 
         assert len(app.exception) == 0, list(app.exception)
         assert len(app.error) == 0, [item.value for item in app.error]
-        assert "New Thread" in button_labels, button_labels
-        assert "Navigate" in radio_labels, radio_labels
+        assert "New chat" in button_labels, button_labels
+        assert "Navigation" in radio_labels, radio_labels
 
         # Availability-only check: route load succeeds and workshop section is present.
-        nav_radio = next(r for r in app.radio if r.label == "Navigate")
-        app = nav_radio.set_value("workshop").run(timeout=30)
+        nav_radio = next(r for r in app.radio if r.label == "Navigation")
+        app = nav_radio.set_value("Workshop").run(timeout=30)
         assert len(app.exception) == 0, list(app.exception)
         assert len(app.error) == 0, [item.value for item in app.error]
 
-        workshop_labels = [str(r.label) for r in app.radio]
-        assert "Workshop section" in workshop_labels, workshop_labels
+        workshop_labels = [str(button.label) for button in app.button]
+        assert "Run live probe" in workshop_labels, workshop_labels
         """
     )
 
     _dadbot_keys = {k for k in os.environ if k.startswith("DADBOT_")}
     _smoke_env = {k: v for k, v in os.environ.items() if k not in _dadbot_keys}
     _smoke_env["PYTHONIOENCODING"] = "utf-8"
+    _smoke_env["DADBOT_TENANT_ID"] = "tenant-streamlit-smoke"
 
     result = subprocess.run(
         [sys.executable, "-c", smoke_code],
@@ -128,18 +129,14 @@ def test_preferences_tab_shows_detected_cloud_llm_api_key_hint(tmp_path):
         """
         from streamlit.testing.v1 import AppTest
 
-        app = AppTest.from_file("dad_streamlit.py").run(timeout=30)
+        app = AppTest.from_string(
+            "from dadbot.core.dadbot import DadBot\\n"
+            "from dadbot.ui.preferences import render_preferences_tab\\n"
+            "render_preferences_tab(DadBot())\\n"
+        ).run(timeout=30)
 
         assert len(app.exception) == 0, list(app.exception)
         assert len(app.error) == 0, [item.value for item in app.error]
-
-        # Navigate to Dad's Workshop
-        nav_radio = next(r for r in app.radio if r.label == "Navigate")
-        app = nav_radio.set_value("workshop").run(timeout=30)
-
-        # Select Preferences section in workshop
-        workshop_radio = next(r for r in app.radio if r.label == "Workshop section")
-        app = workshop_radio.set_value("Preferences").run(timeout=30)
 
         captions = [str(item.value) for item in app.caption]
         assert any("OPENAI_API_KEY" in caption and "detected" in caption for caption in captions), captions
@@ -150,6 +147,7 @@ def test_preferences_tab_shows_detected_cloud_llm_api_key_hint(tmp_path):
     _pref_env = {k: v for k, v in os.environ.items() if k not in _dadbot_keys_pref}
     _pref_env["OPENAI_API_KEY"] = "test-openai-key"
     _pref_env["PYTHONIOENCODING"] = "utf-8"
+    _pref_env["DADBOT_TENANT_ID"] = "tenant-streamlit-preferences"
 
     result = subprocess.run(
         [sys.executable, "-c", smoke_code],
@@ -201,56 +199,29 @@ def test_sidebar_and_button_surface_accessible(tmp_path):
         seen_selects = set()
         collect_labels(app, seen_buttons, seen_checkboxes, seen_selects)
 
-        nav_radio = next(r for r in app.radio if r.label == "Navigate")
-        for view in ("status", "workshop", "voice", "chat"):
+        nav_radio = next(r for r in app.radio if r.label == "Navigation")
+        for view in ("Status", "Workshop", "Voice", "Chat"):
             app = nav_radio.set_value(view).run(timeout=30)
             assert len(app.exception) == 0, list(app.exception)
             assert len(app.error) == 0, [item.value for item in app.error]
             collect_labels(app, seen_buttons, seen_checkboxes, seen_selects)
-            nav_radio = next(r for r in app.radio if r.label == "Navigate")
-
-            if view == "workshop":
-                section_radio = next(r for r in app.radio if r.label == "Workshop section")
-                for section in ("Status", "Preferences", "Data", "Mobile"):
-                    app = section_radio.set_value(section).run(timeout=30)
-                    assert len(app.exception) == 0, list(app.exception)
-                    assert len(app.error) == 0, [item.value for item in app.error]
-                    collect_labels(app, seen_buttons, seen_checkboxes, seen_selects)
-                    nav_radio = next(r for r in app.radio if r.label == "Navigate")
-                    section_radio = next(r for r in app.radio if r.label == "Workshop section")
+            nav_radio = next(r for r in app.radio if r.label == "Navigation")
 
         expected_buttons = {
-            "Open Dad's Workshop",
-            "Go to thread",
-            "New Thread",
-            "📸 Send Photo",
-            "Daily Check-in",
-            "Evolve Persona",
-            "🧵 New Thread",
-            "🎙️ Talk",
-            "📷 Send Photo",
-            "💚 Check-in",
-            "💬 Chat",
-            "🩺 Status",
-            "🛠️ Workshop",
-            "🎙️ Voice",
-            "Force Consolidation",
-            "Clear Semantic Index",
-            "Export Memory",
-            "Optimize Hardware",
-            "Reset session context",
-            "Start Mobile Thread",
-            "Send Photo to Thread",
-            "Switch to Selected Thread",
-            "Generate new avatar",
-            "Write this week's entry",
-            "Search",
+            "New chat",
+            "Duplicate",
+            "New",
+            "Fork",
+            "Probe one turn",
+            "Run live probe",
+            "Clear chat history",
+            "Reset MQTT session",
+            "Reset voice runtime state",
         }
 
         assert expected_buttons.issubset(seen_buttons), sorted(expected_buttons - seen_buttons)
-        assert ("Enable Quiet Mode" in seen_buttons) or ("Disable Quiet Mode" in seen_buttons), sorted(seen_buttons)
-        assert "Show open threads only" in seen_checkboxes, sorted(seen_checkboxes)
-        assert "Switch thread" in seen_selects, sorted(seen_selects)
+        assert "Jor-El source mode" in seen_checkboxes, sorted(seen_checkboxes)
+        assert "Active conversation" in seen_selects, sorted(seen_selects)
         """
     )
 
@@ -259,6 +230,7 @@ def test_sidebar_and_button_surface_accessible(tmp_path):
     _dadbot_keys = {k for k in os.environ if k.startswith("DADBOT_")}
     sandbox_env = {k: v for k, v in os.environ.items() if k not in _dadbot_keys}
     sandbox_env["PYTHONIOENCODING"] = "utf-8"
+    sandbox_env["DADBOT_TENANT_ID"] = "tenant-streamlit-controls"
 
     result = subprocess.run(
         [sys.executable, "-c", smoke_code],

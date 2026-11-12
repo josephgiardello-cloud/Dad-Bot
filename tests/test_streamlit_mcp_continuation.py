@@ -133,7 +133,10 @@ def test_streamlit_mcp_decision_has_canonical_history_job_and_checkpoint(tmp_pat
         assert all(
             event["tenant_id"] == bot.config.tenant_id and event["session_id"] == thread_id for event in scoped
         )
-        checkpoints = [event for event in scoped if event["type"] == "GRAPH_CHECKPOINT"]
+        checkpoints = [
+            event for event in bot._execution_ledger.read_checkpoints(payload_trace_id=decision.trace_id)
+            if event["tenant_id"] == bot.config.tenant_id and event["session_id"] == thread_id
+        ]
         checkpoint = checkpoints[-1]["payload"]["checkpoint"]
         loaded = bot.services.registry.get("persistence_service").persistence_manager.load_latest_graph_checkpoint(
             trace_token=decision.trace_id, session_id=thread_id, tenant_id=bot.config.tenant_id,
@@ -236,8 +239,10 @@ def test_streamlit_mcp_decision_has_canonical_history_job_and_checkpoint(tmp_pat
             assert review_events[0]["payload"]["review_source"] == "user_confirmation"
             assert sum(event["type"] == "JOB_COMPLETED" for event in events_after_review) == 3
             review_checkpoint = next(
-                event["payload"]["checkpoint"] for event in reversed(events_after_review)
-                if event["type"] == "GRAPH_CHECKPOINT" and event["trace_id"] == review.trace_id
+                event["payload"]["checkpoint"] for event in reversed(
+                    bot._execution_ledger.read_checkpoints(payload_trace_id=review.trace_id)
+                )
+                if event["tenant_id"] == bot.config.tenant_id and event["session_id"] == thread_id
             )
             assert "tool_io_ledger" not in review_checkpoint
             assert "user_confirmation" not in str(review_checkpoint.get("tool_io_ledger"))

@@ -269,6 +269,7 @@ class SupportsContextRuntime(Protocol):
         *,
         from_date: str | None = None,
         to_date: str | None = None,
+        record_access: bool = True,
     ) -> list[dict[str, Any]]: ...
 
     def build_active_consolidated_context(self, user_input: str) -> str | None: ...

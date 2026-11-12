@@ -253,13 +253,13 @@ def test_digest_records_validate_cache_and_reject_uncertain_state():
 
 @pytest.mark.parametrize("backend_type", [FileWALLedgerBackend, CRCFileWALLedgerBackend])
 def test_unchanged_append_verifies_only_new_event_after_verified_prefix(tmp_path, monkeypatch, backend_type):
-    from dadbot.core import execution_ledger
+    from dadbot.core import canonical_event
 
     backend = backend_type(tmp_path / "ledger")
     ledger = ExecutionLedger(backend)
     ledger.write(_session_event(0))
     verified_lengths = []
-    verify = execution_ledger._verify_persisted_chain
+    verify = canonical_event._verify_persisted_chain
     loads = []
     load = backend._load_unlocked
 
@@ -271,7 +271,7 @@ def test_unchanged_append_verifies_only_new_event_after_verified_prefix(tmp_path
         loads.append(True)
         return load()
 
-    monkeypatch.setattr(execution_ledger, "_verify_persisted_chain", capture_verify)
+    monkeypatch.setattr(canonical_event, "_verify_persisted_chain", capture_verify)
     monkeypatch.setattr(backend, "_load_unlocked", capture_load)
     for value in range(1, 12):
         ledger.write(_session_event(value))
@@ -565,20 +565,20 @@ def test_custom_append_backends_do_not_skip_their_loaders(tmp_path, monkeypatch,
 
 @pytest.mark.parametrize("backend_type", [FileWALLedgerBackend, CRCFileWALLedgerBackend])
 def test_full_reload_verifies_sealed_history_once_and_preserves_isolated_lineage(tmp_path, monkeypatch, backend_type):
-    from dadbot.core import execution_ledger
+    from dadbot.core import canonical_event
 
     path = tmp_path / "ledger"
     writer = ExecutionLedger(backend_type(path))
     for value in range(8):
         writer.write(_session_event(value))
     hashes = []
-    hash_event = execution_ledger._event_sha256
+    hash_event = canonical_event._event_sha256
 
     def capture_hash(event):
         hashes.append(event["event_id"])
         return hash_event(event)
 
-    monkeypatch.setattr(execution_ledger, "_event_sha256", capture_hash)
+    monkeypatch.setattr(canonical_event, "_event_sha256", capture_hash)
     restored = ExecutionLedger(backend_type(path))
     assert restored.load_from_backend() == 8
     assert len(hashes) == 8

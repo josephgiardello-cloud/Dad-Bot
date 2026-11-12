@@ -78,11 +78,26 @@ def _repo_python_files() -> tuple[Path, ...]:
     for path in REPO_ROOT.rglob("*.py"):
         relative = path.relative_to(REPO_ROOT)
         if relative.parts and (
-            relative.parts[0].startswith(".venv") or relative.parts[0] in {"tests", "session_logs", "runtime", "external"}
+            relative.parts[0].startswith(".venv")
+            or relative.parts[0] in {".tmp", "tests", "session_logs", "runtime", "external"}
         ):
             continue
         files.append(path)
     return tuple(files)
+
+
+def test_repo_python_files_ignore_temporary_application_copies(tmp_path, monkeypatch) -> None:
+    source = tmp_path / "dadbot" / "runtime_core" / "store.py"
+    copied_source = tmp_path / ".tmp" / "app" / "dadbot" / "runtime_core" / "store.py"
+    for path in (source, copied_source):
+        path.parent.mkdir(parents=True)
+        path.write_text("def thread_view(): pass\n", encoding="utf-8")
+    monkeypatch.setitem(globals(), "REPO_ROOT", tmp_path)
+    _repo_python_files.cache_clear()
+    try:
+        assert _repo_python_files() == (source,)
+    finally:
+        _repo_python_files.cache_clear()
 
 
 def _is_consumer_module(path: Path) -> bool:

@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from typing import Any
 
@@ -15,15 +15,42 @@ def _safe_str(value: Any) -> str:
     return str(value or "").strip()
 
 
+def _dict_rows(value: object, *, source: str) -> list[dict[str, Any]]:
+    if not isinstance(value, list) or any(not isinstance(row, dict) for row in value):
+        raise TypeError(f"{source} must be a list of dictionaries")
+    return value
+
+
 @dataclass(slots=True)
 class MemoryIndexer:
-    """Bridge execution ledger events into the existing semantic index backend."""
+    """Read scoped ledger events and explicitly repair the committed catalog index."""
 
     kernel: Any
     session_id: str = "default"
     max_events: int = 500
+    tenant_id: str = field(init=False)
+    _authority_required: bool = field(init=False)
+
+    def __post_init__(self) -> None:
+        from dadbot_system.delegation import live_authority_audit_context
+        from dadbot_system.execution_identity import require_scoped_tenant_id
+
+        self.tenant_id = require_scoped_tenant_id(
+            _safe_str(getattr(getattr(self.kernel, "config", None), "tenant_id", "")),
+        )
+        self._authority_required = live_authority_audit_context()["authority_mode"] != "trusted_local"
+
+    def _authorize(self) -> None:
+        from dadbot_system.delegation import require_tenant_authority_if_active
+        from dadbot_system.security import AuthorizationError
+
+        configured_tenant = _safe_str(getattr(getattr(self.kernel, "config", None), "tenant_id", ""))
+        if configured_tenant != self.tenant_id:
+            raise AuthorizationError("Memory bridge runtime tenant changed")
+        require_tenant_authority_if_active(self.tenant_id, required=self._authority_required)
 
     def _ledger_events(self) -> list[dict[str, Any]]:
+        self._authorize()
         candidates = [
             getattr(self.kernel, "execution_ledger", None),
             getattr(self.kernel, "ledger", None),
@@ -34,16 +61,19 @@ class MemoryIndexer:
                 continue
             reader = getattr(ledger, "read", None)
             if callable(reader):
-                rows = reader()
-                if isinstance(rows, list):
-                    return [dict(item) for item in rows if isinstance(item, dict)]
+                rows = _dict_rows(reader(), source="Memory bridge ledger events")
+                return [
+                    dict(item) for item in rows
+                    if _safe_str(item.get("tenant_id")) == self.tenant_id
+                    and _safe_str(item.get("session_id")) == self.session_id
+                ]
         return []
 
     def _memory_from_event(self, event: dict[str, Any]) -> dict[str, Any] | None:
         payload = dict(event.get("payload") or {})
         event_type = _safe_str(event.get("type") or payload.get("event_type"))
         session = _safe_str(event.get("session_id") or payload.get("session_id") or "default")
-        if session != _safe_str(self.session_id or "default"):
+        if session != self.session_id or _safe_str(event.get("tenant_id")) != self.tenant_id:
             return None
 
         candidates = [
@@ -89,14 +119,17 @@ class MemoryIndexer:
         return memories
 
     def sync(self) -> int:
-        memories = self.materialize_memories()
-        if not memories:
-            return 0
+        self._authorize()
+        catalog = getattr(self.kernel, "memory_catalog", None)
+        if not callable(catalog):
+            raise RuntimeError("Semantic index repair requires a committed memory catalog")
+        memories = _dict_rows(catalog(), source="Memory catalog")
         sync_fn = getattr(self.kernel, "sync_semantic_memory_index", None)
-        if callable(sync_fn):
-            sync_fn(memories)
-            return len(memories)
-        return 0
+        if not callable(sync_fn):
+            raise RuntimeError("Semantic index repair requires sync_semantic_memory_index")
+        self._authorize()
+        sync_fn(memories)
+        return len(memories)
 
 
 class SemanticRetrievalHook:
@@ -108,7 +141,7 @@ class SemanticRetrievalHook:
         *,
         top_k: int = 3,
         session_id: str = "default",
-        sync_index: bool = True,
+        sync_index: bool = False,
     ) -> None:
         self.kernel = kernel
         self.top_k = max(1, int(top_k))
@@ -116,25 +149,29 @@ class SemanticRetrievalHook:
         self.indexer = MemoryIndexer(kernel, session_id=str(session_id or "default"))
 
     def __call__(self, query: str) -> list[str]:
+        self.indexer._authorize()
         text = _safe_str(query)
         if not text:
             return []
 
         if self.sync_index:
-            try:
-                self.indexer.sync()
-            except Exception:
-                pass
+            self.indexer.sync()
 
         memory_catalog = getattr(self.kernel, "memory_catalog", None)
         semantic_matches = getattr(self.kernel, "semantic_memory_matches", None)
         if callable(memory_catalog) and callable(semantic_matches):
-            memories = list(memory_catalog() or [])
+            memories = _dict_rows(memory_catalog(), source="Memory catalog")
             if not memories:
                 return []
-            matches = list(semantic_matches(text, memories, limit=self.top_k) or [])
+            matches = semantic_matches(text, memories, limit=self.top_k)
+            if not isinstance(matches, list):
+                raise TypeError("Semantic memory matches must be a list")
+            rows = [
+                match[1] if isinstance(match, (tuple, list)) and len(match) == 2 else match
+                for match in matches
+            ]
             snippets = []
-            for memory in matches[: self.top_k]:
+            for memory in _dict_rows(rows, source="Semantic memory matches")[: self.top_k]:
                 summary = _safe_str(memory.get("summary"))
                 if not summary:
                     continue
@@ -161,7 +198,7 @@ def build_semantic_snippet_provider(
     *,
     top_k: int = 3,
     session_id: str = "default",
-    sync_index: bool = True,
+    sync_index: bool = False,
 ) -> Any:
     return SemanticRetrievalHook(
         kernel,
@@ -176,7 +213,7 @@ def build_hybrid_memory_snippet_provider(
     *,
     top_k: int = 3,
     session_id: str = "default",
-    sync_index: bool = True,
+    sync_index: bool = False,
 ) -> Any:
     """Use the kernel's hybrid memory query for loop observations."""
     query_manager = getattr(kernel, "memory_query", None)
@@ -193,13 +230,13 @@ def build_hybrid_memory_snippet_provider(
     indexer = MemoryIndexer(kernel, session_id=str(session_id or "default"))
 
     def provide(query: str) -> list[str]:
+        indexer._authorize()
         if sync_index:
             indexer.sync()
-        memories = retrieve(_safe_str(query), limit=limit)
+        memories = retrieve(_safe_str(query), limit=limit, record_access=False)
+        memories = _dict_rows([] if memories is None else memories, source="Hybrid memory results")
         snippets: list[str] = []
-        for memory in memories or []:
-            if not isinstance(memory, dict):
-                raise TypeError("Hybrid memory results must be dictionaries")
+        for memory in memories:
             summary = _safe_str(memory.get("summary"))
             if summary:
                 category = _safe_str(memory.get("category") or "general")
@@ -214,7 +251,7 @@ def build_hybrid_memory_recall_provider(
     *,
     top_k: int = 3,
     session_id: str = "default",
-    sync_index: bool = True,
+    sync_index: bool = False,
 ) -> Any:
     """Return hybrid memories with bounded conflict and timestamp signals."""
     query_manager = getattr(kernel, "memory_query", None)
@@ -239,14 +276,11 @@ def build_hybrid_memory_recall_provider(
     indexer = MemoryIndexer(kernel, session_id=str(session_id or "default"))
 
     def provide_hybrid_recall(query: str) -> MemoryRecall:
+        indexer._authorize()
         if sync_index:
             indexer.sync()
-        memories = retrieve(_safe_str(query), limit=limit)
-        if memories is None:
-            memories = []
-        if not isinstance(memories, list) or any(not isinstance(memory, dict) for memory in memories):
-            raise TypeError("Hybrid memory results must be a list of dictionaries")
-        memories = memories[:limit]
+        memories = retrieve(_safe_str(query), limit=limit, record_access=False)
+        memories = _dict_rows([] if memories is None else memories, source="Hybrid memory results")[:limit]
 
         snippets: list[str] = []
         for memory in memories:
@@ -285,11 +319,12 @@ def _memory_signals(kernel: Any, memories: list[dict[str, Any]]) -> dict[str, An
     coordinator = getattr(kernel, "memory_coordinator", None)
     detect = getattr(coordinator, "detect_memory_contradictions", None)
     if callable(detect) and memories:
-        insight_reader = getattr(kernel, "consolidated_memories", None)
-        insights = list(insight_reader() or [])[-8:] if callable(insight_reader) else []
-        for finding in detect(memories, insights)[:3]:
-            if not isinstance(finding, dict):
-                continue
+        insight_reader = getattr(kernel, "consolidated_memory_catalog", None)
+        insights = _dict_rows(
+            insight_reader() if callable(insight_reader) else [], source="Consolidated memory catalog",
+        )[-8:]
+        findings = _dict_rows(detect(memories, insights), source="Memory contradictions")
+        for finding in findings[:3]:
             left = _safe_str(finding.get("left"))
             right = _safe_str(finding.get("right"))
             reason = _safe_str(finding.get("reason"))

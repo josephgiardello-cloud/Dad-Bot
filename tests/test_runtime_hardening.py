@@ -104,7 +104,7 @@ def test_background_heartbeat_uses_streamlit_turn_lock_for_event_dispatch(monkey
             lock_state["held"] = False
 
     monkeypatch.setattr(
-        "dadbot.ui.streamlit_context.streamlit_turn_lock",
+        "dadbot.core.runtime_locks.runtime_turn_lock",
         lambda _bot: _TrackedLock(),
     )
 

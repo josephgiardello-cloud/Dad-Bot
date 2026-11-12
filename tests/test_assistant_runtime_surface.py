@@ -11,6 +11,11 @@ from dadbot.assistant_runtime import AssistantRuntime
 pytestmark = pytest.mark.unit
 
 
+@pytest.fixture(autouse=True)
+def _isolated_task_workspace(monkeypatch, tmp_path):
+    monkeypatch.setattr("dadbot_system.local_mcp_server._project_root", lambda: tmp_path)
+
+
 class _FakeTaskStore:
     def __init__(self) -> None:
         self._tasks = {}
@@ -36,6 +41,7 @@ class _FakeOrchestration:
 
 class _FakeKernel:
     def __init__(self) -> None:
+        self.config = SimpleNamespace(tenant_id="t1_" + "a" * 26)
         self._last_turn_pipeline = {"phase": "done"}
         self._last_planner_debug = {"tool_calls": ["memory_lookup"]}
         self._last_memory_context_stats = {"tokens": 123}
@@ -79,6 +85,7 @@ class _FakeKernel:
             read=lambda: [
                 {
                     "event_id": "e1",
+                    "tenant_id": self.config.tenant_id,
                     "session_id": "default",
                     "type": "JOB_COMPLETED",
                     "payload": {"summary": "Discussed tomato garden plan"},
@@ -91,7 +98,7 @@ class _FakeKernel:
     def process_user_message(self, message: str):
         return (f"echo::{message}", True)
 
-    def _relevant_memories(self, query: str, limit: int = 5):
+    def _relevant_memories(self, query: str, limit: int = 5, *, record_access: bool = True):
         self.hybrid_memory_queries.append((query, limit))
         return [{"summary": query, "limit": limit}]
 
@@ -305,13 +312,13 @@ def test_run_memory_consolidation_executes_job():
 def test_executive_startup_observation_formats_pending_tasks(monkeypatch):
     monkeypatch.setattr(
         "dadbot_system.local_mcp_server.get_pending_executive_tasks",
-        lambda limit=8: [
+        lambda tenant_id, limit=8: [
             {"id": "tsk1", "title": "Send invoice", "due": "2026-05-13T09:00:00", "priority": "high", "done": False},
             {"id": "tsk2", "title": "Review PR", "due": "", "priority": "normal", "done": False},
         ][:limit],
     )
 
-    text = AssistantRuntime._executive_startup_observation(max_tasks=8)
+    text = AssistantRuntime(_FakeKernel())._executive_startup_observation(max_tasks=8)
 
     assert "Startup executive tasks (pending):" in text
     assert "[tsk1] Send invoice" in text
@@ -321,7 +328,66 @@ def test_executive_startup_observation_formats_pending_tasks(monkeypatch):
 def test_executive_startup_observation_returns_empty_when_no_tasks(monkeypatch):
     monkeypatch.setattr(
         "dadbot_system.local_mcp_server.get_pending_executive_tasks",
-        lambda limit=8: [],
+        lambda tenant_id, limit=8: [],
     )
 
-    assert AssistantRuntime._executive_startup_observation(max_tasks=8) == ""
+    assert AssistantRuntime(_FakeKernel())._executive_startup_observation(max_tasks=8) == ""
+
+
+def test_executive_startup_observation_propagates_authority_failure(monkeypatch):
+    from dadbot_system.security import AuthorizationError
+
+    def reject(**_kwargs):
+        raise AuthorizationError("Executive task authority rejected")
+
+    monkeypatch.setattr("dadbot_system.local_mcp_server.get_pending_executive_tasks", reject)
+    assistant = AssistantRuntime(_FakeKernel())
+    with pytest.raises(AuthorizationError, match="Executive task authority rejected"):
+        assistant._executive_startup_observation()
+
+
+def test_executive_startup_reads_only_its_bound_tenant():
+    from dadbot_system import local_mcp_server as lms
+    from dadbot_system.security import AuthorizationError
+
+    tenant_a, tenant_b = "t1_" + "a" * 26, "t1_" + "b" * 26
+    assistants = {}
+    for tenant, title in ((tenant_a, "Only tenant A"), (tenant_b, "Only tenant B")):
+        lms._write_markdown_tasks(
+            lms._task_file_path(tenant),
+            [{"id": "shared-id", "title": title, "due": "", "priority": "normal", "done": False}],
+            tenant_id=tenant,
+        )
+        kernel = _FakeKernel()
+        kernel.config.tenant_id = tenant
+        assistants[tenant] = AssistantRuntime(kernel)
+    assert "Only tenant A" in assistants[tenant_a]._executive_startup_observation()
+    assert "Only tenant A" not in assistants[tenant_b]._executive_startup_observation()
+    assert "Only tenant B" in assistants[tenant_b]._executive_startup_observation()
+    assistants[tenant_a].kernel.config.tenant_id = tenant_b
+    with pytest.raises(AuthorizationError, match="tenant changed"):
+        assistants[tenant_a]._executive_startup_observation()
+
+
+def test_executive_startup_revalidates_captured_authority(tmp_path):
+    from contextvars import copy_context
+
+    from dadbot_system.delegation import SQLiteDelegationStore, runtime_authority_scope
+    from dadbot_system.security import AuthorizationError, ServiceTokenManager
+
+    tenant = "t1_" + "a" * 26
+    path = str(tmp_path / "authority.sqlite")
+    SQLiteDelegationStore.initialize(path)
+    store = SQLiteDelegationStore(path, "executive-test-secret")
+    manager = ServiceTokenManager("executive-test-secret")
+    principal = manager.verify(manager.issue(subject="executive-reader", tenant_id=tenant, scopes={"read"}))
+    store.grant_membership(issuer="dadbot", subject=principal.subject, tenant_id=tenant, scopes={"read"})
+    with runtime_authority_scope(store, principal, scope="read", tenant_id=tenant):
+        assistant = AssistantRuntime(_FakeKernel())
+        assert assistant._executive_startup_observation() == ""
+        captured = copy_context()
+    with pytest.raises(AuthorizationError):
+        assistant._executive_startup_observation()
+    store.revoke_membership(issuer="dadbot", subject=principal.subject, tenant_id=tenant)
+    with pytest.raises(AuthorizationError):
+        captured.run(assistant._executive_startup_observation)

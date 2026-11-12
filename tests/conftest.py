@@ -1,5 +1,6 @@
 import json
 import os
+import sys
 from datetime import date
 
 import ollama
@@ -10,6 +11,14 @@ from dadbot.core.dadbot import DadBot
 from dadbot.managers.runtime_client import RuntimeClientManager
 
 pytest_plugins = ("tests.phase4_helpers",)
+
+
+@pytest.fixture(autouse=True)
+def preserve_process_entrypoint():
+    """Keep Streamlit AppTest from changing the entrypoint used by Windows spawn."""
+    main_module = sys.modules["__main__"]
+    yield
+    sys.modules["__main__"] = main_module
 
 
 @pytest.fixture

@@ -1,7 +1,7 @@
 # Agent and Memory Hardening Plan
 
 Date: 2026-11-11  
-Status: Approved execution sequence; milestone 0 is in progress.
+Status: Milestone 0 verified for the default local suite; milestone 1 is in progress.
 
 ## Goal
 
@@ -30,73 +30,29 @@ product.
 
 ### Validation status
 
-- Published foundation: commit `9eef5ae6` on `tenant-identity-remediation`.
-- Published fixture correction: commit `d44a6a82` in
-  [kernel contract enforcement tests](../tests/distribution_readiness/tier1_kernel/test_contract_enforcement.py).
-  The fixture now includes safety/save stages instead of bypassing the required
-  save-stage invariant.
-- Latest fixture-release checks: 57 Tier 1 kernel and durable-submission-authority
-  tests passed.
-- Earlier foundation checks passed: 93 proactivity/authority/Streamlit checks and
-  42 loop/snapshot checks.
-- Broad-suite triage fixed deterministic fault sampling, boundary scanning, and
-  obsolete agent API tests. The next group exposed a shadowed supervisor cache
-  and stale checkpoint, SaveNode, and hybrid-ranking test assumptions.
-- Regression, hybrid, and authority checks now pass 192 cases, with 10 expected
-  failures. Memory-manager checks pass 72 cases, with 13 skips. Short Windows
-  temporary paths avoid failures creating long backup filenames.
-- The latest unfiltered diagnostic stopped after 1,396 passes, 104 skips,
-  10 expected failures, 3 failures, and 7 setup errors. The next repairs address
-  Phase 4A fixture scope, missing mocks, invalid helper names, and benchmark
-  error reporting; the separate-process checkpoint test now executes real turns.
-- The repaired Phase 4A/harness/authority selection passes 81 cases with one
-  pre-existing skip. A separate 8-session/40-turn isolation check also passes.
-- The latest ledger/checkpoint/reducer/authority selection passes 281 cases.
-  The 20-turn pruning check now passes in 11.96 seconds under its original
-  30-second limit; 8-session/40-turn isolation passes in 21.04 seconds.
-  Native in-memory ledgers own their records and use revision tokens to avoid
-  unchanged-history reloads. File-WAL byte verification is unchanged.
-  Checkpoint lookups filter payload trace IDs before copying. Turn commit no
-  longer reinserts its existing memory into the reducer.
-- Published lossless-history, collection, and first baseline repairs
-  (`b7f2f6b2`) passed 400 focused cases, with 8 infrastructure skips and 1 optional
-  slow-test skip. Coverage includes checkpoint IO, tenant isolation, restart
-  recovery, malformed-reference rejection, and custom-reader compatibility.
-  The original 20-turn pruning and
-  8-session/40-turn checks pass in 5.38 and 13.19 seconds.
-- Late-turn profiling identified repeated full writes of the rolling execution
-  timeline after its existing 512-entry limit. Suffix references now preserve
-  those windows without rewriting their retained entries. All three original
-  scale gates pass. The 110-turn soak passed repeatedly under its unchanged
-  120-second deadline; the latest affected-suite run completed it in 66.39 seconds.
-- Unfiltered collection completes. A legacy launcher previously ran nested pytest
-  during import and modified `builtins.DadBot`; it is now an import-safe script
-  entrypoint. Broad authority checks also exposed a stale copy-instrumentation
-  hook and a checkpoint cache masking changed wire payloads. Both are repaired;
-  cached checkpoint views now require a matching complete wire-payload hash.
-- The resumed unfiltered run reached 1,440 passes, 103 skips, and 10 expected
-  failures before stopping on 2 failures and 3 setup errors. The affected group
-  now passes 17 cases: synthetic replay events carry tenant identity, the legacy
-  harness checks the current response key, and its integration fixture uses
-  function scope and the supported offline transport without mocking turns.
-  Milestone 0 remains open pending another unfiltered run.
-- Consolidation mapped all 27 shared legacy cases to equivalent or stronger
-  canonical assertions. Three mock checks already existed as module-level tests;
-  the remaining full-mock, real-turn save, and missing-key checks now live in
-  [the canonical Phase 4A suite](../tests/test_phase4a.py). The redundant copy and
-  its one-off generator are removed. The generator's control-character regex
-  also deleted ASCII `f`, corrupting API names.
-- Consolidation verification covers 50 passing cases and one optional slow-test
-  skip, including a focused recheck of all three migrated tests. The unchanged
-  scale gates passed in 109.10 seconds (110 turns), 20.80 seconds (isolation),
-  and 8.81 seconds (pruning). The repository-wide undefined-name check is clean.
-  Unfiltered baseline certification remains open.
-- The tagged
-  [durable submission authority suite](../tests/unit/test_durable_submission_authority.py)
-  passes 29 cases. It covers delegation, revocation, worker execution, and
-  publication; it does not certify every memory projection or consolidation path.
+The unfiltered default suite at `d02ac36d` passed on November 12, 2026: **4,659 passed,
+123 skipped, 10 expected failures, zero failures**. Test deadlines and production
+authority checks are unchanged.
 
-No full-suite or production-readiness claim follows from these focused passes.
+The original scale gates in [Phase 4A](../tests/test_phase4a.py) also passed:
+
+| Gate | Time | Limit |
+| --- | --- | --- |
+| 110 canonical turns | 117.64 s | 120 s |
+| Eight sessions, five turns each | 22.00 s | 60 s |
+| 20-turn exact pruning count | 10.00 s | 30 s |
+
+Baseline repairs cover tenant-qualified fixtures, materialized checkpoint views,
+same-request tool replay, deterministic pipeline clocks, selective-copy
+instrumentation, Streamlit/Windows process isolation, and import-cycle removal.
+Canonical hashing and chain verification now share the existing
+[canonical event module](../dadbot/core/canonical_event.py). UI and heartbeat
+dispatch share the same [runtime lock](../dadbot/core/runtime_locks.py).
+
+PostgreSQL, Redis, live-model integrations, optional dependencies, slow/stress
+runs, and explicitly quarantined cases remain unverified where skipped.
+Skips are not passes. This baseline does not certify every memory projection,
+consolidation path, or production deployment.
 
 ### Local history format
 
@@ -182,10 +138,9 @@ skips are not passes.
 - Trace actual ingress into memory recall, index synchronization, consolidation,
   snapshot load/restore, and proactive workers. Build a supported-path matrix
   before adding metadata or adapters.
-- Examine bridge event selection: [MemoryIndexer](../dadbot/runtime/semantic_memory_bridge.py)
-  currently filters by session and has no explicit tenant field. Determine what
-  the real reader guarantees; require tenant-bound reads instead of relying on
-  matching session strings.
+- Keep [MemoryIndexer](../dadbot/runtime/semantic_memory_bridge.py) bound to an
+  explicit tenant. Filter canonical tenant/session identity before limiting
+  events, even when the underlying reader returns several tenants.
 - Audit the bridge's index synchronization against committed catalog fences.
   Observation must stay read-only; indexing/repair belongs behind committed-state
   authority, not arbitrary event materialization.
@@ -195,11 +150,10 @@ skips are not passes.
   status store.
 - Verify tenant-qualified index locations, caches, recovery status, and adapter
   filters under concurrent access.
-- Reconcile loop snapshot files with canonical authority. The current
-  [loop snapshot implementation](../dadbot/runtime/loop_snapshot.py) uses
-  session-only filenames, omits goal state, and writes progress from a reflection
-  hook before dispatch. A snapshot must not claim an uncommitted turn or serve as
-  an alternative authority.
+- Reconcile [loop snapshots](../dadbot/runtime/loop_snapshot.py) with canonical
+  authority. Tenant ownership and conservative driver-record accounting are
+  implemented; canonical receipt reconciliation and durable goal state remain
+  open. A snapshot must not serve as an alternative authority.
 - Make supported recovery paths fail explicitly on corrupt or mismatched state.
   Preserve source memory and ledger history during migration.
 
@@ -212,6 +166,106 @@ tenant's committed state; corrupt authority never falls back to staged state.
 
 Extend existing authority, tenant-memory, local-mutation, projection-status, and
 loop-resume tests rather than duplicating their coverage.
+
+### Supported-path status
+
+| Path | Authority boundary | Status |
+| --- | --- | --- |
+| Loop observation | Tenant-bound provider, committed memory/insight catalogs, verified semantic read fence | Implemented; does not publish access updates or schedule index repair |
+| Explicit semantic repair | Committed catalog and existing tenant revision/publication fences | Implemented; empty catalogs clear obsolete rows; failures propagate |
+| Ledger recall fallback | Live authority and canonical tenant/session filtering before the event limit | Implemented |
+| Projection recovery | Versioned ledger-backed status and tenant-qualified SQLite indexes | Local publication ordering covered; adapter and multi-process rebuild certification remain open |
+| Loop snapshots | Tenant/session-hashed paths, exact payload ownership, live authority, atomic publication | Diagnostic snapshots hardened; canonical receipt reconciliation and production resume wiring remain open |
+| Executive startup tasks | Tenant-qualified Markdown boards, owner headers, live authority, and fenced atomic updates | Implemented; unowned legacy tasks are preserved but excluded |
+
+Observation providers pass `record_access=False` to hybrid retrieval; custom
+hybrid adapters must accept that keyword. Ordinary retrieval retains access
+recording by default. `semantic_sync_index=True` explicitly requests repair from
+the committed catalog; the loop default is false. Reflection reads consolidated
+facts through `consolidated_memory_catalog()`, not the mutation-capable
+`consolidated_memories()` accessor.
+
+Semantic lookup propagates authorization, unavailable-authority, and corrupt
+ledger errors. Captured authenticated providers cannot downgrade to trusted-local
+access when their authority context disappears, and retained contexts recheck
+membership after revocation. These repairs do not complete milestone 1.
+
+Recall repair (`7755dcb7`) targeted validation: **324 passed, 13 slow/stress tests skipped** across authority,
+recall, recovery, isolation, and architecture checks. The unchanged scale gates
+passed in 101.21 s / 120 s, 13.41 s / 60 s, and 5.51 s / 30 s. The full suite was
+not rerun for this repair group. Changed-file syntax/import lint checks pass;
+overall lint remains non-clean, including argument-count and complexity
+diagnostics on the extended retrieval API.
+
+Executive task boards use `executive_tasks.<sha256-tenant-id>.md` under the
+workspace session-log directory and require an exact owner header. The pending
+reader requires `tenant_id`; missing boards return no tasks without creating
+files. Corrupt, duplicate-ID, or mismatched-owner boards fail explicitly.
+Mutations hold the tenant authority and file locks through atomic publication.
+Task fields must fit a single Markdown row; task IDs no longer depend on seconds.
+
+The old unowned board is neither read into observations nor reassigned on startup.
+Migration requires an operator to assign rows to verified owners and re-add them
+through each tenant's executive tools, retaining the original board.
+
+Executive-task repair validation: **230 passed, zero skips** across the task,
+MCP, UI continuation, driver, tenant, authority, and architecture selection.
+Coverage includes a fresh-process reload, cross-tenant read/completion attempts,
+corrupt-source preservation, failed publication, concurrent updates, and captured
+authority revocation. This is targeted evidence, not a new full-suite result.
+
+Loop snapshots require an explicit tenant and versioned, owner-matched JSON.
+Missing reads do not create files; corrupt, ambiguous, or mismatched snapshots
+fail without replacement or deletion. Unowned legacy files remain untouched and
+excluded. New managers refuse to overwrite an existing run; reconcile canonical
+state before explicitly removing its snapshot.
+
+The reflection wrapper records only prior driver dispatch records, not the
+pending turn index. Failed, rejected, and skipped attempts do not advance the
+completed count. Finalization checks result identity and counters against its
+records. The wrapper can lag the last dispatch after interruption. These are
+local diagnostics, not receipt-backed proof: they cannot authorize skipping or
+resending actions. `AgentDriverLoop.run()` has no snapshot-resume API, and
+AssistantRuntime does not wire this standalone manager into production recovery.
+
+Snapshot repair validation: **151 passed, zero skips** across snapshot lifecycle,
+driver, memory bridge, authority, tenant isolation, and architecture tests.
+Coverage includes fresh-process reload, corruption preservation, publication
+failure, session-name collisions, and revocation. No new changed-file lint or
+Pylance error diagnostics; the full suite was not rerun.
+
+Projection recovery retains `PROJECTION_STATUS_UPDATED` as its status authority.
+Metadata version 1 records the attempted committed source revision, last
+successfully applied revision, required revision, generation, dirty flag, and
+rebuild reason. A failed attempt does not advance the applied revision.
+Semantic recovery uses the committed catalog, not staged Observation state.
+Authority failures propagate rather than being recorded as backend degradation;
+status reads and publication revalidate live tenant authority.
+
+Legacy successful statuses infer an applied revision from their source. Failed
+statuses retain prior successful evidence, or leave the applied revision unknown
+when none exists. Invalid or future-revision metadata fails explicitly without
+rewriting ledger history. Metadata versioning does not certify every adapter's
+physical index schema.
+
+Projection repair (`8c129806`) validation: **202 passed, zero skips** across recovery,
+process-termination, authority, isolation, and architecture tests. The unchanged
+scale deadlines passed at 112.18 s / 120 s, 20.62 s / 60 s, and 8.96 s / 30 s.
+No new lint diagnostics; existing lint/type debt remains. This is targeted
+evidence, not a new full-suite result. Milestone 1 remains open.
+
+New projection generations use the ledger publication sequence, not a count of
+rebuild attempts. Allocation and append share the ledger lock; head-conflict
+retries allocate again after reload. Replay follows durable event order, retains
+known successful applied revisions on failure, and excludes reports older than
+the known applied revision from the current status. Superseded attempts remain
+in the audit history. Existing WAL/revision fences still guard index writes.
+
+Concurrent-publication validation: **208 passed, zero skips**, including
+overlapping rebuilds, independent ledger writers, late failures, and the existing
+stale-index/crash-recovery cases. Scale gates passed at 102.80 s / 120 s,
+20.80 s / 60 s, and 8.77 s / 30 s. No new lint diagnostics. Full-suite,
+multi-process rebuild, and non-SQLite adapter certification remain separate.
 
 ## 2. Certify memory-first observation
 

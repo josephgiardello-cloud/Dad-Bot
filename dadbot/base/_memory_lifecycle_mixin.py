@@ -75,6 +75,9 @@ class MemoryLifecycleMixin:
     def consolidated_memories(self):
         return self._lifecycle.consolidated_memories()
 
+    def consolidated_memory_catalog(self):
+        return self._lifecycle.consolidated_memory_catalog()
+
     def memory_graph_snapshot(self):
         return self._lifecycle.memory_graph_snapshot()
 

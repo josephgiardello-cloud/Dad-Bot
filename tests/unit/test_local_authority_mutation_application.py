@@ -34,6 +34,192 @@ def test_mutation_survives_restart(make_test_dadbot, monkeypatch, tmp_path):
     assert json.loads(memory.read_text(encoding="utf-8"))["last_mood"] == "stale-mirror"
 
 
+def test_catalog_reads_committed_memory_without_index_writes_or_discarding_staged_changes(
+    make_test_dadbot, monkeypatch,
+):
+    from dadbot.core.execution_context import close_core_state_scope, open_core_state_scope
+
+    monkeypatch.setenv("DADBOT_DURABLE_EXECUTION_LEDGER", "1")
+    bot = make_test_dadbot()
+    bot.mutate_memory_store(memories=[{"id": "committed", "summary": "Committed preference"}])
+    committed = bot._execution_ledger.replay_tenant_memory(bot.config.tenant_id)
+    queued = []
+    monkeypatch.setattr(bot.memory_manager, "queue_semantic_memory_index", queued.append)
+    token = open_core_state_scope(bot.memory_manager.memory_core_state())
+    try:
+        staged = bot.mutate_memory_store(
+            save=False, memories=[{"id": "staged", "summary": "Uncommitted preference"}],
+        )
+        assert bot.memory_catalog() == committed.state["memories"]
+        assert bot.memory_manager.memory_projection() == staged
+        assert bot._execution_ledger.replay_tenant_memory(bot.config.tenant_id).state == committed.state
+        assert not queued
+    finally:
+        close_core_state_scope(token)
+
+
+def test_memory_reads_revalidate_runtime_principal(make_test_dadbot, tmp_path):
+    import time
+
+    from dadbot_system.delegation import SQLiteDelegationStore, runtime_authority_scope
+    from dadbot_system.security import AuthorizationError, ServicePrincipal
+
+    tenant_a = "t1_" + "a" * 26
+    tenant_b = "t1_" + "b" * 26
+    bot = make_test_dadbot(tenant_id=tenant_a)
+    authority_path = str(tmp_path / "authority.sqlite")
+    SQLiteDelegationStore.initialize(authority_path)
+    store = SQLiteDelegationStore(authority_path, "memory-authority-test-secret")
+    principal = ServicePrincipal(
+        subject="memory-reader", tenant_id=tenant_b, scopes=frozenset({"write"}),
+        allowed_tools=frozenset(), issuer="dadbot", expires_at=time.time() + 3600, token_id="memory-reader",
+    )
+    store.grant_membership(issuer=principal.issuer, subject=principal.subject, tenant_id=tenant_b, scopes={"write"})
+    with runtime_authority_scope(store, principal, scope="write", tenant_id=tenant_b):
+        with pytest.raises(AuthorizationError, match="tenant mismatch"):
+            bot.memory_manager.memory_projection()
+
+
+@pytest.mark.parametrize("entrypoint", ["projection", "provider"])
+def test_memory_reads_reject_missing_required_authority(make_test_dadbot, entrypoint):
+    from dadbot.runtime.semantic_memory_bridge import SemanticRetrievalHook
+    from dadbot_system.delegation import require_live_effect_authority
+    from dadbot_system.security import AuthorizationError
+
+    bot = make_test_dadbot()
+    hook = SemanticRetrievalHook(bot)
+    with require_live_effect_authority():
+        with pytest.raises(AuthorizationError):
+            if entrypoint == "projection":
+                bot.memory_manager.memory_projection()
+            else:
+                hook("tea")
+
+
+def test_recall_uses_committed_insights_and_index_while_memory_changes_are_staged(
+    make_test_dadbot, monkeypatch,
+):
+    from dadbot.core.execution_context import close_core_state_scope, open_core_state_scope
+    from dadbot.runtime.semantic_memory_bridge import build_hybrid_memory_recall_provider
+
+    monkeypatch.setenv("DADBOT_DURABLE_EXECUTION_LEDGER", "1")
+    bot = make_test_dadbot()
+    bot.mutate_memory_store(
+        memories=[{"summary": "Committed preference"}],
+        consolidated_memories=[{"summary": "Committed insight"}],
+    )
+    committed = bot._execution_ledger.replay_tenant_memory(bot.config.tenant_id)
+    bot.sync_semantic_memory_index(committed.state["memories"])
+    observed = []
+    monkeypatch.setattr(
+        bot.memory_query, "relevant_memories_for_input",
+        lambda _query, limit=3, record_access=True: committed.state["memories"][:limit],
+    )
+
+    def detect(_memories, insights):
+        observed.extend(insights)
+        return []
+
+    monkeypatch.setattr(bot.memory_coordinator, "detect_memory_contradictions", detect)
+    token = open_core_state_scope(bot.memory_manager.memory_core_state())
+    try:
+        staged = bot.mutate_memory_store(
+            save=False,
+            memories=[{"summary": "Uncommitted preference"}],
+            consolidated_memories=[{"summary": "Uncommitted insight"}],
+        )
+        build_hybrid_memory_recall_provider(bot)("preference")
+        assert observed == committed.state["consolidated_memories"]
+        with bot.memory_manager._semantic_manager.verified_semantic_index_read(committed.state["memories"]) as current:
+            assert current
+        assert bot.memory_manager.memory_projection() == staged
+        assert bot._execution_ledger.replay_tenant_memory(bot.config.tenant_id) == committed
+    finally:
+        close_core_state_scope(token)
+
+
+@pytest.mark.parametrize("entrypoint", ["facade", "manager"])
+def test_semantic_recall_does_not_schedule_index_writes(make_test_dadbot, monkeypatch, entrypoint):
+    monkeypatch.setenv("DADBOT_DURABLE_EXECUTION_LEDGER", "1")
+    bot = make_test_dadbot()
+    bot.mutate_memory_store(memories=[{"id": "committed", "summary": "saving money"}])
+    semantic = bot.memory_manager._semantic_manager
+    queued = []
+    monkeypatch.setattr(semantic, "queue_semantic_memory_index", queued.append)
+
+    target = bot if entrypoint == "facade" else semantic
+    target.semantic_memory_matches("saving money", bot.memory_catalog())
+
+    assert not queued
+
+
+@pytest.mark.parametrize("structured", [False, True])
+def test_hybrid_observation_does_not_publish_access_updates(make_test_dadbot, monkeypatch, structured):
+    from dadbot.runtime.semantic_memory_bridge import (
+        build_hybrid_memory_recall_provider,
+        build_hybrid_memory_snippet_provider,
+    )
+
+    monkeypatch.setenv("DADBOT_DURABLE_EXECUTION_LEDGER", "1")
+    bot = make_test_dadbot()
+    bot.mutate_memory_store(memories=[{"summary": "My preferred fruit is an apple.", "category": "preferences"}])
+    assert bot.wait_for_semantic_index_idle(timeout=30)
+    before = bot._execution_ledger.replay_tenant_memory(bot.config.tenant_id)
+    provider = build_hybrid_memory_recall_provider if structured else build_hybrid_memory_snippet_provider
+    result = provider(bot)("apple")
+    snippets = result.snippets if structured else result
+    assert len(snippets) == 1
+    assert bot._execution_ledger.replay_tenant_memory(bot.config.tenant_id) == before
+
+
+def test_semantic_observation_reads_real_ranked_results(make_test_dadbot, monkeypatch):
+    from dadbot.runtime.semantic_memory_bridge import SemanticRetrievalHook
+
+    monkeypatch.setenv("DADBOT_DURABLE_EXECUTION_LEDGER", "1")
+    bot = make_test_dadbot()
+
+    def embeddings(texts, **_kwargs):
+        return [[1.0, 0.0] for _ in ([texts] if isinstance(texts, str) else texts)]
+
+    monkeypatch.setattr(bot.memory_manager._semantic_manager, "embed_texts", embeddings)
+    bot.mutate_memory_store(memories=[{"summary": "My preferred fruit is an apple.", "category": "preferences"}])
+    assert bot.wait_for_semantic_index_idle(timeout=30)
+    before = bot._execution_ledger.replay_tenant_memory(bot.config.tenant_id)
+    snippets = SemanticRetrievalHook(bot)("apple")
+    assert len(snippets) == 1
+    assert "apple" in snippets[0]
+    assert bot._execution_ledger.replay_tenant_memory(bot.config.tenant_id) == before
+
+
+@pytest.mark.parametrize("failure", ["authorization", "authority_unavailable", "corrupt_wal", "corrupt_memory"])
+@pytest.mark.parametrize("entrypoint", ["facade", "manager"])
+def test_semantic_recall_does_not_hide_authority_errors(make_test_dadbot, monkeypatch, failure, entrypoint):
+    from dadbot.core.ledger_backend import WALCorruptionError
+    from dadbot.core.tenant_memory_ledger import TenantMemoryLedgerCorruption
+    from dadbot_system.delegation import AuthorityUnavailableError
+    from dadbot_system.security import AuthorizationError
+
+    errors = {
+        "authorization": AuthorizationError,
+        "authority_unavailable": AuthorityUnavailableError,
+        "corrupt_wal": WALCorruptionError,
+        "corrupt_memory": TenantMemoryLedgerCorruption,
+    }
+    error = errors[failure]
+    bot = make_test_dadbot()
+    semantic = bot.memory_manager._semantic_manager
+    monkeypatch.setattr(semantic, "queue_semantic_memory_index", lambda _memories: None)
+    monkeypatch.setattr(semantic, "semantic_query_context", lambda *_args: {"query_embedding": [1.0]})
+
+    def fail(_memories):
+        raise error("Recall authority rejected")
+
+    monkeypatch.setattr(semantic, "verified_semantic_index_read", fail)
+    target = bot if entrypoint == "facade" else semantic
+    with pytest.raises(error, match="Recall authority rejected"):
+        target.semantic_memory_matches("saving money", [{"summary": "saving money"}])
+
+
 def test_save_boundary_mutations_reuse_byte_verified_head_without_full_rehydration(make_test_dadbot, monkeypatch):
     from dadbot.core.execution_ledger import ExecutionLedger
 
