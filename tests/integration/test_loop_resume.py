@@ -3,11 +3,13 @@
 from __future__ import annotations
 
 import json
+import os
 import subprocess
 import sys
 from contextvars import copy_context
 from dataclasses import asdict, dataclass
 from typing import Any
+from unittest.mock import AsyncMock
 
 import pytest
 
@@ -19,6 +21,288 @@ pytestmark = pytest.mark.integration
 TENANT = "t1_" + "a" * 26
 OTHER_TENANT = "t1_" + "b" * 26
 SESSION = "test-resume-session-42"
+
+
+@pytest.fixture
+def canonical_loop_bot(make_test_dadbot, monkeypatch, tmp_path):
+    from dadbot.core.execution_receipt import ReceiptSigner
+
+    monkeypatch.setenv("DADBOT_DURABLE_EXECUTION_LEDGER", "1")
+    monkeypatch.setenv("DADBOT_EXECUTION_LEDGER_BACKEND", "file")
+    monkeypatch.setenv("DADBOT_RECEIPT_KEY", os.urandom(32).hex())
+    monkeypatch.setattr("dadbot_system.local_mcp_server._project_root", lambda: tmp_path)
+    bot = make_test_dadbot(tenant_id=TENANT)
+    monkeypatch.setattr(bot.model_port, "generate", lambda *_args, **_kwargs: "verified reply")
+    monkeypatch.setattr(bot.model_port, "generate_async", AsyncMock(return_value="verified reply"))
+    bot.services.turn_orchestrator.control_plane.graph.configure_receipt_signer(ReceiptSigner())
+    try:
+        yield bot
+    finally:
+        bot.shutdown()
+
+
+def _run_durable(bot, **kwargs):
+    from dadbot.assistant_runtime import AssistantRuntime
+
+    return AssistantRuntime(bot).run_agent_loop(
+        "bounded goal", session_id=SESSION, policy=DriverLoopPolicy(max_turns=2),
+        reflection_hook=lambda _ctx: {"action_input": "perform bounded work"},
+        enable_semantic_memory=False, **kwargs,
+    )
+
+
+def test_production_resume_reconciles_committed_dispatch_without_reexecution(canonical_loop_bot, monkeypatch):
+    from dadbot.core.session_store import SessionStore
+
+    bot = canonical_loop_bot
+    control_plane = bot.services.turn_orchestrator.control_plane
+    original = bot.execute_turn
+    calls = []
+
+    def crash_after_commit(request, **kwargs):
+        calls.append(request.metadata["request_id"])
+        original(request, **kwargs)
+        raise SystemExit("process lost after canonical completion")
+
+    monkeypatch.setattr(bot, "execute_turn", crash_after_commit)
+    with pytest.raises(SystemExit, match="process lost"):
+        _run_durable(bot, durable=True)
+    state = SessionStore.projected_from_ledger(ledger=control_plane.ledger).get(SESSION, tenant_id=TENANT)
+    assert state["agent_loop_cursor"]["pending_request_id"] == calls[0]
+    completed = control_plane._ledger_index.completed_metadata(
+        session_id=SESSION, tenant_id=TENANT, request_id=calls[0],
+    )
+    assert completed is not None
+    assert completed["metadata"]["execution_receipt_status"] == "verified"
+    monkeypatch.setattr(bot, "execute_turn", original)
+    resumed = _run_durable(bot, resume=True)
+    assert resumed.completed_turns == 2
+    assert [record.turn_index for record in resumed.records] == [2]
+    assert resumed.stop_reason == "max_turns"
+    assert len(control_plane._ledger_index.completed_agent_loop_entries(
+        session_id=SESSION, tenant_id=TENANT,
+    )) == 2
+    again = _run_durable(bot, resume=True)
+    assert again.records == []
+    assert again.completed_turns == 2
+    state = SessionStore.projected_from_ledger(ledger=control_plane.ledger).get(SESSION, tenant_id=TENANT)
+    assert state["agent_loop_cursor"]["pending_request_id"] == ""
+    assert state["agent_loop_cursor"]["stop_reason"] == "max_turns"
+
+
+def test_production_resume_in_fresh_process(canonical_loop_bot, monkeypatch):
+    bot = canonical_loop_bot
+    original = bot.execute_turn
+
+    def crash_after_commit(request, **kwargs):
+        original(request, **kwargs)
+        raise SystemExit("lost response")
+
+    monkeypatch.setattr(bot, "execute_turn", crash_after_commit)
+    with pytest.raises(SystemExit, match="lost response"):
+        _run_durable(bot, durable=True)
+    bot.shutdown()
+    script = """
+import json, os, sys
+from pathlib import Path
+from unittest.mock import AsyncMock
+from dadbot.assistant_runtime import AssistantRuntime
+from dadbot.config import DadBotConfig
+from dadbot.core.dadbot import DadBot
+from dadbot.core.execution_receipt import ReceiptSigner
+from dadbot.memory.semantic_manager import SemanticIndexManager
+from dadbot.runtime.agent_driver_loop import DriverLoopPolicy
+import dadbot_system.local_mcp_server as tasks
+tasks._project_root = lambda: Path(os.environ["DADBOT_SESSION_LOG_DIR"]).parent
+SemanticIndexManager.embed_texts = lambda self, texts, purpose=None: [[1.0] * 12 for _ in texts]
+bot = DadBot(config=DadBotConfig(tenant_id=sys.argv[1]))
+bot.model_port.generate = lambda *args, **kwargs: "verified reply"
+bot.model_port.generate_async = AsyncMock(return_value="verified reply")
+control_plane = bot.services.turn_orchestrator.control_plane
+control_plane.graph.configure_receipt_signer(ReceiptSigner())
+try:
+    result = AssistantRuntime(bot).run_agent_loop(
+        "bounded goal", session_id=sys.argv[2], policy=DriverLoopPolicy(max_turns=2),
+        reflection_hook=lambda ctx: {"action_input": "perform bounded work"},
+        enable_semantic_memory=False, resume=True)
+    print(json.dumps({
+        "completed": result.completed_turns,
+        "turns": [record.turn_index for record in result.records],
+        "stop": result.stop_reason,
+        "commits": len(control_plane._ledger_index.completed_agent_loop_entries(
+            session_id=sys.argv[2], tenant_id=sys.argv[1])),
+    }))
+finally:
+    bot.shutdown()
+"""
+    result = subprocess.run(
+        [sys.executable, "-c", script, TENANT, SESSION],
+        capture_output=True, text=True, timeout=60, check=False,
+    )
+    assert result.returncode == 0, f"{result.stdout}\n{result.stderr}"
+    recovered = json.loads(result.stdout.strip().splitlines()[-1])
+    assert recovered == {"completed": 2, "turns": [2], "stop": "max_turns", "commits": 2}
+
+
+def test_production_resume_rejects_rotated_receipt_key_without_dispatch(canonical_loop_bot, monkeypatch):
+    from dadbot.core.execution_receipt import ReceiptSigner
+
+    bot = canonical_loop_bot
+    _run_durable(bot, durable=True)
+    control_plane = bot.services.turn_orchestrator.control_plane
+    control_plane.graph.configure_receipt_signer(ReceiptSigner(os.urandom(32)))
+
+    def forbidden_dispatch(*_args, **_kwargs):
+        pytest.fail("Mismatched receipt keys must never authorize dispatch")
+
+    monkeypatch.setattr(bot, "execute_turn", forbidden_dispatch)
+    before = control_plane.ledger.event_count()
+    with pytest.raises(ValueError, match="receipt envelope"):
+        _run_durable(bot, resume=True)
+    assert control_plane.ledger.event_count() == before
+
+
+def test_production_resume_refuses_uncertain_dispatch(canonical_loop_bot, monkeypatch):
+    bot = canonical_loop_bot
+
+    def crash_before_completion(_request, **_kwargs):
+        raise SystemExit("lost dispatch")
+
+    monkeypatch.setattr(bot, "execute_turn", crash_before_completion)
+    with pytest.raises(SystemExit, match="lost dispatch"):
+        _run_durable(bot, durable=True)
+    with pytest.raises(RuntimeError, match=r"uncertain.*resend"):
+        _run_durable(bot, resume=True)
+    with pytest.raises(RuntimeError, match="explicitly resumed"):
+        _run_durable(bot, durable=True)
+    with pytest.raises(RuntimeError, match="explicitly resumed"):
+        _run_durable(bot)
+
+
+@pytest.mark.parametrize("damage", ["owner", "budget"])
+def test_production_resume_preserves_corrupt_canonical_cursor(canonical_loop_bot, damage):
+    from dadbot.core.session_store import SessionStore
+
+    bot = canonical_loop_bot
+    _run_durable(bot, durable=True)
+    ledger = bot._execution_ledger
+    state = SessionStore.projected_from_ledger(ledger=ledger).get(SESSION, tenant_id=TENANT)
+    cursor = state["agent_loop_cursor"]
+    cursor.update({"tenant_id": OTHER_TENANT} if damage == "owner" else {"next_turn": -1})
+    ledger.write({
+        "type": "SESSION_STATE_UPDATED", "tenant_id": TENANT, "session_id": SESSION,
+        "trace_id": "corrupt-cursor-test", "kernel_step_id": "test.cursor",
+        "timestamp": "2026-11-12", "committed": True,
+        "payload": {"tenant_id": TENANT, "state": {"agent_loop_cursor": cursor}},
+    })
+    before = ledger.event_count()
+    with pytest.raises(ValueError, match="cursor"):
+        _run_durable(bot, resume=True)
+    assert ledger.event_count() == before
+    assert SessionStore.projected_from_ledger(ledger=ledger).get(
+        SESSION, tenant_id=TENANT,
+    )["agent_loop_cursor"] == cursor
+
+
+def test_production_resume_revalidates_captured_authority(canonical_loop_bot, tmp_path):
+    from dadbot.assistant_runtime import AssistantRuntime
+    from dadbot_system.delegation import SQLiteDelegationStore, runtime_authority_scope
+    from dadbot_system.security import ServiceTokenManager
+
+    bot = canonical_loop_bot
+    _run_durable(bot, durable=True)
+    path = str(tmp_path / "resume-authority.sqlite")
+    SQLiteDelegationStore.initialize(path)
+    store = SQLiteDelegationStore(path, "resume-test-authority")
+    tokens = ServiceTokenManager("resume-test-authority")
+    principal = tokens.verify(tokens.issue(subject="resume-user", tenant_id=TENANT, scopes={"write"}))
+    store.grant_membership(issuer="dadbot", subject=principal.subject, tenant_id=TENANT, scopes={"write"})
+    with runtime_authority_scope(store, principal, scope="write", tenant_id=TENANT):
+        runtime = AssistantRuntime(bot)
+        captured = copy_context()
+    options = {
+        "session_id": SESSION, "policy": DriverLoopPolicy(max_turns=2),
+        "enable_semantic_memory": False, "resume": True,
+    }
+    before = bot._execution_ledger.event_count()
+    with pytest.raises(AuthorizationError):
+        runtime.run_agent_loop("bounded goal", **options)
+    store.revoke_membership(issuer="dadbot", subject=principal.subject, tenant_id=TENANT)
+    with pytest.raises(AuthorizationError):
+        captured.run(runtime.run_agent_loop, "bounded goal", **options)
+    assert bot._execution_ledger.event_count() == before
+
+
+def test_canonical_loop_claim_excludes_competing_process(canonical_loop_bot):
+    from dadbot.core.agent_loop_recovery import agent_loop_recovery_lock
+
+    backend = canonical_loop_bot._execution_ledger._backend
+    path = str(backend.path())
+    script = """
+import sys
+from dadbot.core.agent_loop_recovery import agent_loop_recovery_lock
+from dadbot.core.ledger_backend import FileWALLedgerBackend
+backend = FileWALLedgerBackend(sys.argv[3])
+try:
+    with agent_loop_recovery_lock(backend, tenant_id=sys.argv[1], session_id=sys.argv[2]):
+        raise AssertionError("Competing loop acquired an active claim")
+except RuntimeError:
+    print("claim rejected")
+"""
+    with agent_loop_recovery_lock(backend, tenant_id=TENANT, session_id=SESSION):
+        result = subprocess.run(
+            [sys.executable, "-c", script, TENANT, SESSION, path],
+            capture_output=True, text=True, timeout=20, check=False,
+        )
+        assert result.returncode == 0, result.stderr
+        assert result.stdout.strip() == "claim rejected"
+    with agent_loop_recovery_lock(backend, tenant_id=TENANT, session_id=SESSION):
+        pass
+
+
+def test_production_resume_preserves_noop_budget(canonical_loop_bot):
+    from dadbot.assistant_runtime import AssistantRuntime
+
+    bot = canonical_loop_bot
+    seen = []
+
+    def interrupted_reflection(ctx):
+        seen.append(ctx["turn_index"])
+        if ctx["turn_index"] == 2:
+            raise SystemExit("reflection interrupted")
+        return {"action_input": ""}
+
+    options = {
+        "session_id": SESSION, "policy": DriverLoopPolicy(max_turns=4, max_consecutive_noop=2),
+        "enable_semantic_memory": False,
+    }
+    runtime = AssistantRuntime(bot)
+    with pytest.raises(SystemExit, match="reflection interrupted"):
+        runtime.run_agent_loop("bounded goal", reflection_hook=interrupted_reflection, durable=True, **options)
+    resumed = runtime.run_agent_loop(
+        "bounded goal", reflection_hook=lambda _ctx: {"action_input": ""}, resume=True, **options,
+    )
+    assert seen == [1, 2]
+    assert [record.turn_index for record in resumed.records] == [2]
+    assert resumed.stop_reason == "noop_threshold"
+    assert resumed.consecutive_noop == 2
+    assert resumed.completed_turns == 0
+
+
+def test_production_resume_rejects_changed_input_policy_and_foreign_session(canonical_loop_bot):
+    from dadbot.assistant_runtime import AssistantRuntime
+
+    runtime = AssistantRuntime(canonical_loop_bot)
+    _run_durable(canonical_loop_bot, durable=True)
+    for text, session, policy in (
+        ("changed goal", SESSION, DriverLoopPolicy(max_turns=2)),
+        ("bounded goal", SESSION, DriverLoopPolicy(max_turns=3)),
+        ("bounded goal", "foreign-session", DriverLoopPolicy(max_turns=2)),
+    ):
+        with pytest.raises(ValueError, match="cursor"):
+            runtime.run_agent_loop(
+                text, session_id=session, policy=policy, resume=True, enable_semantic_memory=False,
+            )
 
 
 @dataclass

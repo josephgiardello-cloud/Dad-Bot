@@ -185,6 +185,7 @@ def test_run_agent_loop_on_facade_returns_result():
     assert kernel.reflection_payloads[0]["memory_signals"] == {
         "conflicts": [],
         "temporal": [],
+        "retrieval": {"status": "degraded", "reason": "hybrid_query_unavailable"},
     }
 
 

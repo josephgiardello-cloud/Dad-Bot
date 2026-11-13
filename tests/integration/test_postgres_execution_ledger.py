@@ -672,6 +672,25 @@ def test_bot_boot_shares_selected_postgres_ledger(postgres_store, make_test_dadb
     assert reloaded.read()[0]["payload"]["state"]["value"] == 1
 
 
+def test_postgres_primitive_certification_does_not_enable_loop_resume(
+    postgres_store, make_test_dadbot, monkeypatch,
+):
+    from dadbot.assistant_runtime import AssistantRuntime
+    from dadbot.core.execution_receipt import ReceiptSigner
+
+    monkeypatch.setenv("DADBOT_DURABLE_EXECUTION_LEDGER", "1")
+    monkeypatch.setenv("DADBOT_EXECUTION_LEDGER_BACKEND", "postgres")
+    bot = make_test_dadbot(document_store=postgres_store)
+    bot.services.turn_orchestrator.control_plane.graph.configure_receipt_signer(
+        ReceiptSigner(b"test-only-loop-receipt-key-000001"),
+    )
+    before = bot._execution_ledger.event_count()
+    for options in ({"durable": True}, {"resume": True}):
+        with pytest.raises(RuntimeError, match="non-file recovery is not certified"):
+            AssistantRuntime(bot).run_agent_loop("goal", **options)
+    assert bot._execution_ledger.event_count() == before
+
+
 def test_postgres_committed_tenant_memory_survives_session_restore(
     postgres_store, make_test_dadbot, monkeypatch,
 ):

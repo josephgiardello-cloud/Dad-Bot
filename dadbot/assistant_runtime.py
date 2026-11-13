@@ -3,13 +3,24 @@ from __future__ import annotations
 import hashlib
 import inspect
 from collections import deque
+from collections.abc import Callable
+from dataclasses import asdict
 from threading import Lock
 from typing import Any
+from uuid import uuid4
 
 from dadbot.core.agent_loop_progress import (
-    reconcile_committed_agent_loop_progress,
     read_agent_loop_goal_blackboard,
     read_agent_loop_tool_outcome_evidence,
+    reconcile_committed_agent_loop_progress,
+)
+from dadbot.core.agent_loop_recovery import (
+    AgentLoopCursor,
+    agent_loop_recovery_lock,
+    project_agent_loop_session,
+    recover_agent_loop_cursor,
+    supports_agent_loop_recovery,
+    validate_agent_loop_policy,
 )
 from dadbot.core.execution_contract import ExecutionEntry, TurnDelivery, live_turn_request
 from dadbot.runtime.agent_driver_loop import AgentDriverLoop, DriverLoopPolicy, DriverLoopResult
@@ -309,8 +320,122 @@ class AssistantRuntime:
         reflection_hook: Any | None = None,
         observation_hook: Any | None = None,
         enable_semantic_memory: bool = True,
-        semantic_top_k: int = 3,
+        semantic_top_k: int = 5,
         semantic_sync_index: bool = False,
+        durable: bool = False,
+        resume: bool = False,
+    ) -> DriverLoopResult:
+        from dadbot_system.delegation import require_tenant_authority_if_active
+        from dadbot_system.security import AuthorizationError
+
+        if str(getattr(getattr(self.kernel, "config", None), "tenant_id", "") or "") != self._executive_task_tenant:
+            raise AuthorizationError("Agent-loop runtime tenant changed")
+        require_tenant_authority_if_active(
+            self._executive_task_tenant, required=self._executive_authority_required,
+        )
+        options = {
+            "policy": policy,
+            "session_id": session_id,
+            "reflection_hook": reflection_hook,
+            "observation_hook": observation_hook,
+            "enable_semantic_memory": enable_semantic_memory,
+            "semantic_top_k": semantic_top_k,
+            "semantic_sync_index": semantic_sync_index,
+        }
+        tenant = self._executive_task_tenant
+        orchestrator = getattr(self.kernel, "turn_orchestrator", None)
+        control_plane = getattr(orchestrator, "control_plane", None)
+        if control_plane is None:
+            control_plane = getattr(self.kernel, "control_plane", None)
+        if not durable and not resume:
+            return self._run_new_agent_loop(initial_input, control_plane, options)
+        if control_plane is None:
+            raise RuntimeError("Durable agent loops require a canonical control plane")
+        signer = control_plane.graph.receipt_signer
+        if not signer.is_stable:
+            raise RuntimeError("Durable agent loops require a stable execution receipt key")
+        loop_policy = asdict(policy or DriverLoopPolicy())
+        validate_agent_loop_policy(loop_policy)
+        with agent_loop_recovery_lock(
+            control_plane.ledger._backend, tenant_id=tenant, session_id=session_id,
+        ):
+            state = project_agent_loop_session(control_plane, tenant_id=tenant, session_id=session_id)
+            value = state.get("agent_loop_cursor")
+            if resume:
+                cursor = AgentLoopCursor.read(
+                    value, tenant_id=tenant, session_id=session_id,
+                    initial_input=initial_input, policy=loop_policy,
+                )
+            else:
+                if value is not None:
+                    previous = AgentLoopCursor.read(
+                        value, tenant_id=tenant, session_id=session_id,
+                        initial_input=None, policy=value.get("policy") if type(value) is dict else {},
+                    )
+                    if not previous.stop_reason:
+                        raise RuntimeError("An interrupted canonical loop must be explicitly resumed")
+                cursor = AgentLoopCursor(
+                    tenant_id=tenant, session_id=session_id, loop_run_id=uuid4().hex,
+                    input_hash=hashlib.sha256(initial_input.encode("utf-8")).hexdigest(),
+                    policy=loop_policy, last_action_input=initial_input,
+                )
+            initial_reply = recover_agent_loop_cursor(
+                cursor, control_plane._ledger_index, signer,
+            ) if resume else ""
+            session = control_plane.registry.get_or_create(session_id, tenant_id=tenant)
+            session["state"] = state
+
+            def persist_cursor(current: AgentLoopCursor) -> None:
+                require_tenant_authority_if_active(tenant, required=self._executive_authority_required)
+                AgentLoopCursor.read(
+                    current.to_dict(), tenant_id=tenant, session_id=session_id,
+                    initial_input=initial_input, policy=loop_policy,
+                )
+                control_plane.kernel_gateway.persist_agent_loop_state(
+                    session_id=session_id, tenant_id=tenant, trace_token=current.loop_run_id,
+                    state_patch={"agent_loop_cursor": current.to_dict()},
+                )
+
+            return self._run_agent_loop(
+                initial_input, **options, recovery_cursor=cursor,
+                persist_cursor=persist_cursor, initial_reply=initial_reply,
+            )
+
+    def _run_new_agent_loop(
+        self, initial_input: str, control_plane: Any, options: dict[str, Any],
+    ) -> DriverLoopResult:
+        backend = getattr(getattr(control_plane, "ledger", None), "_backend", None)
+        if not supports_agent_loop_recovery(backend):
+            return self._run_agent_loop(initial_input, **options)
+        tenant = self._executive_task_tenant
+        session_id = options["session_id"]
+        with agent_loop_recovery_lock(backend, tenant_id=tenant, session_id=session_id):
+            state = project_agent_loop_session(control_plane, tenant_id=tenant, session_id=session_id)
+            value = state.get("agent_loop_cursor")
+            if value is not None:
+                cursor = AgentLoopCursor.read(
+                    value, tenant_id=tenant, session_id=session_id,
+                    initial_input=None, policy=value.get("policy") if type(value) is dict else {},
+                )
+                if not cursor.stop_reason:
+                    raise RuntimeError("An interrupted canonical loop must be explicitly resumed")
+            control_plane.registry.get_or_create(session_id, tenant_id=tenant)["state"] = state
+            return self._run_agent_loop(initial_input, **options)
+
+    def _run_agent_loop(
+        self,
+        initial_input: str,
+        *,
+        policy: DriverLoopPolicy | None = None,
+        session_id: str = "default",
+        reflection_hook: Any | None = None,
+        observation_hook: Any | None = None,
+        enable_semantic_memory: bool = True,
+        semantic_top_k: int = 5,
+        semantic_sync_index: bool = False,
+        recovery_cursor: AgentLoopCursor | None = None,
+        persist_cursor: Any | None = None,
+        initial_reply: str = "",
     ) -> DriverLoopResult:
         loop_policy = policy or DriverLoopPolicy()
         tenant_id = str(getattr(getattr(self.kernel, "config", None), "tenant_id", "default") or "default")
@@ -325,8 +450,12 @@ class AssistantRuntime:
             session = control_plane.registry.get_or_create(session_id, tenant_id=tenant_id)
             session_state = dict(session.get("state") or {})
             ledger_index = getattr(control_plane, "_ledger_index", None)
-            completed_metadata = getattr(ledger_index, "completed_metadata", None)
-            completed_agent_loop_entries = getattr(ledger_index, "completed_agent_loop_entries", None)
+            completed_metadata: Callable[..., dict[str, Any] | None] | None = getattr(
+                ledger_index, "completed_metadata", None,
+            )
+            completed_agent_loop_entries: Callable[..., list[dict[str, Any]]] | None = getattr(
+                ledger_index, "completed_agent_loop_entries", None,
+            )
             if not callable(completed_metadata) or not callable(completed_agent_loop_entries):
                 raise RuntimeError("Agent loop requires canonical completion lookup on its control plane")
             entries = completed_agent_loop_entries(session_id=session_id, tenant_id=tenant_id)
@@ -337,7 +466,11 @@ class AssistantRuntime:
                 session_id=session_id,
             ):
                 last_committed = session_state["agent_loop_progress"]["last_committed"]
-                merge_session_state = getattr(control_plane, "_merge_session_state", None)
+                gateway = getattr(control_plane, "kernel_gateway", None)
+                merge_session_state = (
+                    gateway.persist_agent_loop_state if gateway is not None
+                    else getattr(control_plane, "_merge_session_state", None)
+                )
                 if not callable(merge_session_state):
                     raise RuntimeError("Agent loop cannot persist reconciled canonical progress")
                 merge_session_state(
@@ -375,6 +508,8 @@ class AssistantRuntime:
             policy=loop_policy,
             allowed_tools=tool_names,
             commit_verifier=commit_verifier,
+            recovery_cursor=recovery_cursor,
+            persist_cursor=persist_cursor,
         )
         effective_reflection_hook = reflection_hook
         if effective_reflection_hook is None:
@@ -389,7 +524,8 @@ class AssistantRuntime:
         startup_observation = self._executive_startup_observation(max_tasks=8)
         if startup_observation:
             effective_observation_hook = self._compose_startup_observation_hook(
-                effective_observation_hook, startup_observation
+                effective_observation_hook, startup_observation,
+                include_in_context=observation_hook is None and enable_semantic_memory,
             )
 
         return loop.run(
@@ -400,6 +536,7 @@ class AssistantRuntime:
             observation_hook=effective_observation_hook,
             initial_goal_blackboard=initial_goal_blackboard,
             initial_tool_outcome_evidence=initial_tool_outcome_evidence,
+            initial_reply=initial_reply,
         )
 
     def _build_default_reflection_hook(self, tool_names: list[str]) -> Any:
@@ -443,18 +580,24 @@ class AssistantRuntime:
         )
 
     @staticmethod
-    def _compose_startup_observation_hook(base_hook: Any, startup_observation: str) -> Any:
+    def _compose_startup_observation_hook(
+        base_hook: Any, startup_observation: str, *, include_in_context: bool = False,
+    ) -> Any:
         def composed_observation_hook(ctx: dict[str, Any]) -> str:
+            first_turn = int(ctx.get("turn_index", 1) or 1) == 1
+            if first_turn and include_in_context:
+                ctx["system_observation"] = "\n\n".join(
+                    part for part in (startup_observation, str(ctx.get("system_observation") or "")) if part
+                )
             if callable(base_hook):
                 base_text = str(base_hook(ctx) or "")
             else:
-                turn_index = int(ctx.get("turn_index", 1) or 1)
                 base_text = (
                     str(ctx.get("initial_observation") or "")
-                    if turn_index == 1
+                    if first_turn
                     else str(ctx.get("last_reply") or ctx.get("initial_observation") or "")
                 )
-            if int(ctx.get("turn_index", 1) or 1) != 1:
+            if not first_turn or include_in_context:
                 return base_text
             return f"{startup_observation}\n\n{base_text}".strip()
 

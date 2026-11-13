@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 from collections.abc import Callable
-from dataclasses import dataclass, field
+from dataclasses import asdict, dataclass, field
 from time import perf_counter
 from typing import TYPE_CHECKING, Any, Protocol, cast
 from uuid import uuid4
@@ -10,6 +10,7 @@ from dadbot.core.agent_loop_progress import (
     normalize_goal_blackboard,
     normalize_tool_outcome_evidence,
 )
+from dadbot.core.agent_loop_recovery import AgentLoopCursor
 from dadbot.core.execution_contract import SovereignContext, TurnDelivery, TurnResponse, live_turn_request
 from dadbot.runtime.structured_output import AgentPlan, SchemaValidationError, verify_agent_plan
 
@@ -87,6 +88,8 @@ class AgentDriverLoop:
         event_bus: EventBus | None = None,
         allowed_tools: list[str] | None = None,
         commit_verifier: CanonicalCommitVerifier | None = None,
+        recovery_cursor: AgentLoopCursor | None = None,
+        persist_cursor: Callable[[AgentLoopCursor], None] | None = None,
     ) -> None:
         self.kernel = kernel
         self.policy = policy or DriverLoopPolicy()
@@ -96,6 +99,14 @@ class AgentDriverLoop:
         self._allowed_tools = None if selected_tools is None else list(selected_tools)
         self._trigger_type = str(self.policy.trigger_type or "interactive")
         self._commit_verifier = commit_verifier
+        self._recovery_cursor = recovery_cursor
+        self._persist_cursor = persist_cursor
+        if (recovery_cursor is None) != (persist_cursor is None):
+            raise ValueError("Canonical loop recovery requires both cursor and persistence")
+
+    def _save_cursor(self) -> None:
+        if self._recovery_cursor is not None and self._persist_cursor is not None:
+            self._persist_cursor(self._recovery_cursor)
 
     def _read_completion_evidence(
         self,
@@ -289,6 +300,10 @@ class AgentDriverLoop:
     ) -> tuple[str, str, bool]:
         started = perf_counter()
         request_id = uuid4().hex
+        if self._recovery_cursor is not None:
+            self._recovery_cursor.pending_request_id = request_id
+            self._recovery_cursor.last_action_input = turn.action_input
+            self._save_cursor()
         try:
             response_obj = self.kernel.execute_turn(
                 live_turn_request(
@@ -386,6 +401,9 @@ class AgentDriverLoop:
             ),
         )
         result.completed_turns += 1
+        if self._recovery_cursor is not None:
+            self._recovery_cursor.last_request_id = request_id
+            self._recovery_cursor.pending_request_id = ""
         if reply.strip():
             result.consecutive_noop = 0
         else:
@@ -439,6 +457,7 @@ class AgentDriverLoop:
         observation_hook: ObservationHook | None = None,
         initial_goal_blackboard: dict[str, str] | None = None,
         initial_tool_outcome_evidence: dict[str, Any] | None = None,
+        initial_reply: str = "",
     ) -> DriverLoopResult:
         result = DriverLoopResult(
             goal_blackboard=normalize_goal_blackboard(initial_goal_blackboard or {}),
@@ -446,10 +465,34 @@ class AgentDriverLoop:
             tenant_id=str(tenant_id or "default"),
             session_id=str(session_id or "default"),
         )
-        loop_run_id = uuid4().hex
-        last_reply = ""
-        last_action_input = str(initial_observation or "")
-        pending_system_observation = ""
+        cursor = self._recovery_cursor
+        loop_run_id = cursor.loop_run_id if cursor is not None else uuid4().hex
+        last_reply = initial_reply
+        last_action_input = cursor.last_action_input if cursor is not None else str(initial_observation or "")
+        pending_system_observation = cursor.system_observation if cursor is not None else ""
+        if cursor is not None:
+            AgentLoopCursor.read(
+                cursor.to_dict(), tenant_id=tenant_id, session_id=session_id,
+                initial_input=initial_observation, policy=asdict(self.policy),
+            )
+            result.completed_turns = cursor.completed_turns
+            result.failures = cursor.failures
+            result.consecutive_noop = cursor.consecutive_noop
+            self._save_cursor()
+            if cursor.stop_reason:
+                result.stop_reason = cursor.stop_reason
+                return result
+
+        def checkpoint(next_turn: int, *, stop_reason: str = "") -> None:
+            if cursor is None or cursor.pending_request_id:
+                return
+            cursor.next_turn = next_turn
+            cursor.completed_turns = result.completed_turns
+            cursor.failures = result.failures
+            cursor.consecutive_noop = result.consecutive_noop
+            cursor.system_observation = pending_system_observation
+            cursor.stop_reason = stop_reason
+            self._save_cursor()
 
         self._emit(
             "loop_started",
@@ -461,7 +504,7 @@ class AgentDriverLoop:
             }, "trigger_type": self._trigger_type},
         )
 
-        for turn_index in range(1, int(self.policy.max_turns) + 1):
+        for turn_index in range(cursor.next_turn if cursor is not None else 1, int(self.policy.max_turns) + 1):
             normalized_session_id = str(session_id or "default")
             ctx_payload = {
                 "tenant_id": result.tenant_id,
@@ -490,9 +533,11 @@ class AgentDriverLoop:
 
             plan, retry_observation, should_stop = self._prepare_turn(result, reflection_hook, turn)
             if should_stop:
+                checkpoint(turn_index + 1, stop_reason=result.stop_reason)
                 break
             if plan is None:
                 pending_system_observation = retry_observation
+                checkpoint(turn_index + 1)
                 continue
 
             record_count = len(result.records)
@@ -509,9 +554,12 @@ class AgentDriverLoop:
             ):
                 result.goal_blackboard.update(plan.goal_updates)
             if should_stop:
+                checkpoint(turn_index + 1, stop_reason=result.stop_reason)
                 break
+            checkpoint(turn_index + 1)
         else:
             result.stop_reason = "max_turns"
+            checkpoint(int(self.policy.max_turns) + 1, stop_reason=result.stop_reason)
 
         self._emit(
             "loop_stopped",

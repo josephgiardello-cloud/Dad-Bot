@@ -1,10 +1,13 @@
 # Agent and Memory Hardening Plan
 
 Date: 2026-11-11  
-Status: Milestone 0 is complete for the default local suite; milestone 1 is in
-progress. Goal proposals now affect loop progress only after a committed turn;
-safe partial-loop recovery, canonical receipt reconciliation, and non-SQLite
-backend certification remain open.
+Status: Milestone 0 has a passing default local baseline. Supported-profile
+authority/recovery acceptance and opt-in, receipt-verified File-WAL loop resume
+are implemented. PostgreSQL/Redis primitives have real-service evidence;
+non-file loop resume, non-SQLite physical projections, goal postconditions, and
+live-model quality remain uncertified. Milestone 2's synthetic File-WAL/SQLite
+observation quality and ingress checks pass, and the final runtime passed its
+unfiltered release gate. Skipped capabilities remain outside certification.
 
 ## Goal
 
@@ -20,10 +23,10 @@ memory, temporal, and autonomy work.
 
 | Area | Current evidence | Remaining work |
 | --- | --- | --- |
-| Driver Loop | Bounded turns, structured reflection, plan validation, canonical request/run identities, and scoped completion verification exist in [AgentDriverLoop](../dadbot/runtime/agent_driver_loop.py). Successful post-turn processing persists a bounded goal board and hash-only tool outcome summaries through session state; [AssistantRuntime](../dadbot/assistant_runtime.py) restores them with tenant/session checks and reconciles a safe missing-progress tail from canonical completions. The graph emits and verifies bounded HMAC stage receipts when a stable key is configured, then attaches them to canonical completion metadata. | Verify goal postconditions; support safe partial-loop recovery without replaying uncertain actions. |
-| Memory-first observation | [AssistantRuntime](../dadbot/assistant_runtime.py) enables memory observation by default for `run_agent_loop`. Its provider calls `relevant_memories_for_input`. | Certify every supported loop ingress and measure retrieval quality. Use the richer graph/semantic/consolidated/archive bundle where appropriate rather than assuming the current provider covers all sources. |
+| Driver Loop | Bounded turns, structured reflection, plan validation, canonical request/run identities, and scoped completion verification exist in [AgentDriverLoop](../dadbot/runtime/agent_driver_loop.py). Successful post-turn processing persists a bounded goal board and hash-only tool outcome summaries. [AssistantRuntime](../dadbot/assistant_runtime.py) reconciles missing progress and offers opt-in, receipt-verified File-WAL resume with durable budgets and a pre-dispatch marker. | Verify goal postconditions; reconcile uncertain external effects and support receipt-key rotation. Non-file loop resume remains explicitly unavailable. |
+| Memory-first observation | [AssistantRuntime](../dadbot/assistant_runtime.py) uses the read-only `retrieve_context` bundle by default. The versioned synthetic File-WAL/SQLite profile passes measured quality, budget, provenance, isolation, five actual canonical ingress checks, and the unfiltered release gate. | Live-model quality and non-SQLite observation profiles remain uncertified; paraphrase performance is weak with offline embeddings. |
 | Online consolidation | [PersistenceService](../dadbot/services/persistence.py) publishes post-commit readiness; [PostCommitWorker](../dadbot/services/post_commit_worker.py) invokes consolidation. | Durable scheduling, authority propagation, idempotency, meaningful success reporting, and recovery after process loss. |
-| Durable memory authority | [MemoryStorageBackend](../dadbot/memory/storage.py) authorizes memory access, fences local index writes, and records tenant-specific projection status in the ledger. | Certify completeness across bridge, worker, snapshot, and supported adapter paths; metadata is not absent, but coverage must be proven. |
+| Durable memory authority | [MemoryStorageBackend](../dadbot/memory/storage.py) authorizes memory access, fences local index writes, and records tenant-specific projection status. Bridge, worker, snapshot, File-WAL/SQLite recovery, and PostgreSQL/Redis primitive paths have executed acceptance coverage below. | Non-SQLite physical memory projection recovery and authenticated PostgreSQL execution are not certified; do not infer those capabilities from primitive service tests. |
 | Temporal/conflict handling | Reflection receives bounded timestamp/conflict signals. [Bi-temporal edge tests](../tests/test_bitemporal_graph_edges.py) cover existing edge validity fields. | Consistent as-of retrieval, provenance-aware corrections, late-arrival handling, and conflict decisions surviving restart. |
 | Proactivity | A heartbeat processes at most one queued event through the loop; its reflection plan has an empty tool allowlist. | Durable deduplication and worker ownership; verify downstream tool enforcement, not just reflection policy. |
 | Goalplan | [CURRENT_GOALPLAN](CURRENT_GOALPLAN.md) was updated on November 11, 2026. | Replace broad capability claims with acceptance evidence after each hardening milestone. |
@@ -33,7 +36,53 @@ product.
 
 ### Validation status
 
-The latest unfiltered default suite passed on November 12, 2026: **4,743 passed,
+The final milestone-2 runtime passed the unfiltered default suite on
+November 13, 2026: **4,812 passed, 124 skipped, 10 expected failures, zero
+failures** in **3,632.18 seconds**. No acceptance deadlines, authentication
+checks, or service skip conditions were relaxed. The milestone-2 section below
+records the timing anomalies, final evidence-only fingerprint correction,
+focused rerun, measured quality, and remaining certification boundaries.
+
+The final authority/recovery checkout passed the unfiltered default suite on
+November 12, 2026: **4,789 passed, 124 skipped, 10 expected failures, zero failures**
+in **1,347.74 seconds (22m 27s)**. The tested checkout was `1d64625f` plus the
+recovery changes described below and the fixture corrections in this section.
+No acceptance deadlines or authority checks were relaxed.
+
+The first full run of that recovery checkout produced **4,783 passed, 124 skipped,
+10 expected failures, six failures** in **1,391.11 seconds**. All six reproduced
+in the focused selection (**six failed, 13 passed**) and were fixture contract
+mismatches:
+
+- The [agentic loop test](../tests/test_agentic_methods.py) replaced canonical
+  execution with a success-shaped response without a committed completion.
+  It now records real canonical turns using offline model transport, checks
+  committed goal-board progression, and asserts two canonical completions.
+- Five [response-engine integration tests](../tests/unit/test_response_engine_control_plane_integration.py)
+  set the tenant in job metadata but left `job.tenant_id` as an automatically
+  created Mock. The fixtures now bind the explicit job owner to their authorized
+  tenant scope. Tenant mismatch rejection remains unchanged.
+
+Both owning modules and the directly related driver/progress regressions then
+passed together: **43 passed, zero failures, zero skips**. Changed-fixture
+syntax/import lint checks and `git diff --check` passed.
+
+The successful unfiltered rerun used the command below, fresh isolated
+`TEMP`/`TMP` and pytest storage, and no selectors or marker exclusions.
+Its [Phase 4A](../tests/test_phase4a.py) gates passed at **115.072 s / 120 s**
+(110 canonical turns), **21.030 s / 60 s** (eight sessions, five turns each),
+and **8.561 s / 30 s** (exact pruning count), measured from JUnit.
+
+The **124 skips** include PostgreSQL/PGVector (36), Redis (6), local live-model
+checks (6), missing optional `litellm` collection (1), production Compose
+certification (2), slow/stress lanes (71), and explicitly quarantined cases (2).
+This local full-suite result does not certify those paths. The separate
+**437-test** supported-profile run below did execute selected PostgreSQL/Redis
+primitives against disposable services; it does not certify PGVector,
+non-SQLite physical projections, authenticated PostgreSQL execution, or live-model
+quality. The 10 expected failures are separate from the 124 skips.
+
+The earlier milestone-0 unfiltered default suite passed on November 12, 2026: **4,743 passed,
 123 skipped, 10 expected failures, zero failures** in **1,361.19 seconds
 (22m 41s)**. The tested checkout was `827499a9` plus the fixture-only correction
 described below, published together with this record. No production code,
@@ -76,10 +125,11 @@ Canonical hashing and chain verification now share the existing
 [canonical event module](../dadbot/core/canonical_event.py). UI and heartbeat
 dispatch share the same [runtime lock](../dadbot/core/runtime_locks.py).
 
-PostgreSQL, Redis, live-model integrations, optional dependencies, slow/stress
-runs, and explicitly quarantined cases remain unverified where skipped.
-Skips are not passes. This baseline does not certify every memory projection,
-consolidation path, or production deployment.
+Service integrations, optional dependencies, slow/stress runs, and explicitly
+quarantined cases remain unverified where skipped, except for the separate
+executed supported-profile evidence below. Skips are not passes. The local
+baseline does not certify every memory projection, consolidation path, or
+production deployment.
 
 ### Local history format
 
@@ -179,8 +229,9 @@ skips are not passes.
   filters under concurrent access.
 - Reconcile [loop snapshots](../dadbot/runtime/loop_snapshot.py) with canonical
   authority. Tenant ownership and conservative driver-record accounting are
-  implemented; canonical receipt reconciliation and durable goal state remain
-  open. A snapshot must not serve as an alternative authority.
+  implemented. Production resume now uses a canonical cursor and reverified
+  completion receipts, never snapshot counters. A snapshot must not serve as
+  an alternative authority.
 - Make supported recovery paths fail explicitly on corrupt or mismatched state.
   Preserve source memory and ledger history during migration.
 
@@ -201,9 +252,44 @@ loop-resume tests rather than duplicating their coverage.
 | Loop observation | Tenant-bound provider, committed memory/insight catalogs, verified semantic read fence | Implemented; does not publish access updates or schedule index repair |
 | Explicit semantic repair | Committed catalog and existing tenant revision/publication fences | Implemented; empty catalogs clear obsolete rows; failures propagate |
 | Ledger recall fallback | Live authority and canonical tenant/session filtering before the event limit | Implemented |
-| Projection recovery | Versioned ledger-backed status and tenant-qualified SQLite indexes | File-WAL/SQLite concurrent graph and semantic rebuilds exercised in separate processes; non-SQLite adapter certification remains open |
-| Loop snapshots | Tenant/session-hashed paths, exact payload ownership, live authority, atomic publication | Diagnostic snapshots hardened; canonical receipt reconciliation and production resume wiring remain open |
+| Projection recovery | Versioned ledger-backed status and tenant-qualified SQLite indexes | File-WAL/SQLite concurrent graph and semantic rebuilds, process-loss repair, corruption preservation, and revocation exercised; non-SQLite physical projections remain uncertified |
+| Loop snapshots and resume | Tenant/session-hashed diagnostic files; canonical cursor and exact completion/receipt verification for execution | File-WAL resume wired through the kernel gateway; missing or incompatible completion evidence blocks resend. Snapshot files remain untouched and non-authoritative |
 | Executive startup tasks | Tenant-qualified Markdown boards, owner headers, live authority, and fenced atomic updates | Implemented; unowned legacy tasks are preserved but excluded |
+| PostgreSQL primitives | Isolated execution-ledger streams; tenant-owned session/task paths and forced RLS with a non-bypass role | Real service tests cover restart, process loss, corruption, competing writers, and same-key tenant isolation. This is not authenticated PostgreSQL execution or physical memory-index certification |
+| Redis and Redis/PostgreSQL composite | Tenant-owned session/task envelopes; PostgreSQL durable authority in the composite path | Real service tests cover fresh-process recovery, concurrent tenant writes, scoped termination, corrupt envelopes, and durable composite task recovery/publication. Redis alone is not an execution WAL |
+
+The selected service tests use `DADBOT_TEST_POSTGRES_DSN` and
+`DADBOT_TEST_REDIS_URL`, disposable loopback-only containers, unique table/key
+namespaces, and a PostgreSQL `NOSUPERUSER NOBYPASSRLS` login. They do not contact
+the existing application containers or live models. Primitive acceptance does
+not enable non-file loop resume; an explicit regression verifies that refusal.
+
+Final supported-path validation on November 12, 2026: **437 passed, zero failures,
+zero skips** in **265.15 seconds**. The selection covered loop/progress/receipt
+tests, semantic bridges, projection status and repair, delegated workers,
+authenticated WAL boundaries, SQLite service publication, tenant memory restore
+and mutation, PostgreSQL/Redis integration, checkpoint adapters, and ledger
+authority invariants. It used isolated pytest storage, no marker exclusions,
+and `-o faulthandler_timeout=0`; the normal test deadlines were unchanged.
+Focused recovery helpers and added tests pass Ruff; Pylance reports no diagnostics
+in the new recovery module, progress module, gateway, or driver. The facade still
+has unrelated existing type/lint diagnostics, and the keyword-rich loop APIs
+exceed the repository's argument-count lint threshold.
+
+This is not an unfiltered full-suite result. Live-model quality, optional
+dependency/service paths outside this selection, slow/stress lanes outside this
+selection, receipt-key rotation, and non-SQLite physical memory projections
+remain uncertified. The disposable service containers were removed after testing.
+
+Production recovery uses `durable=True` to start and `resume=True` to continue
+with the same tenant/session, initial-input hash, and policy. A cross-process
+File-WAL claim serializes competing loop runs. The cursor persists before
+dispatch and after each definite outcome; an interrupted dispatch requires its
+exact `JOB_COMPLETED`, recorded result, and valid stable-key receipt chain.
+Uncertain work remains blocked even when a caller attempts a new ordinary loop.
+Ready checkpoints retain turn/failure/no-op budgets and system observations.
+Completed checkpoints return without model calls or duplicate execution.
+Standalone snapshots are not migrated, deleted, or used as resume input.
 
 Observation providers pass `record_access=False` to hybrid retrieval; custom
 hybrid adapters must accept that keyword. Ordinary retrieval retains access
@@ -257,8 +343,8 @@ AssistantRuntime does not wire this standalone manager into production recovery.
 
 Validated goal updates are now applied to the in-memory goal blackboard only
 after a dispatch returns committed. A failed dispatch cannot make its proposal
-appear as progress to later reflections. This does not persist or recover goal
-state across runs.
+appear as progress to later reflections. That initial repair did not persist
+goal state; the subsequent canonical progress and cursor paths described above do.
 
 Snapshot repair validation: **151 passed, zero skips** across snapshot lifecycle,
 driver, memory bridge, authority, tenant isolation, and architecture tests.
@@ -336,7 +422,7 @@ not rerun for this addition.
   graph relationships, cross-session preferences, superseded facts, irrelevant
   queries, and tenant collisions.
 
-### Proposed measurable gate
+### Approved measurable gate
 
 - Evidence recall@5 >= 0.85 and nDCG@5 >= 0.80 on the labeled dataset.
 - No regression against the current path on exact-fact cases.
@@ -345,10 +431,171 @@ not rerun for this addition.
   are separately documented and tested.
 - Candidate p95 recall latency <= 1.20 times the recorded baseline on the same
   hardware/corpus. Freeze corpus size, model/backend, context budget, and absolute
-  latency budget during milestone 0 before treating performance as certified.
+  latency budget before treating performance as certified.
 
-These are proposed acceptance targets, not current measurements. Ranking quality
-must be measured; merely checking that the provider was called is insufficient.
+The user approved a synthetic File-WAL/SQLite profile with deterministic offline
+embeddings and an absolute p95 budget of **200 ms**. The quality and ingress selection and final-runtime unfiltered release run pass
+for this profile.
+
+### Measured profile and results
+
+The versioned corpus and regression gate are in
+[memory_benchmark.py](../tests/eval/memory_benchmark.py) and
+[test_memory_observation_benchmark.py](../tests/eval/test_memory_observation_benchmark.py).
+The profile freezes:
+
+- Dataset `memory-observation.v1`, corpus/query date **2026-11-12**.
+- **55 records**: 50 raw facts, three active consolidated facts, one superseded
+  consolidated fact, and one archive.
+- **257 queries**: 200 exact forms, all 50 authored paraphrases, and seven
+  graph/cross-session/supersession/archive/irrelevant cases; 255 positive queries.
+- Corpus SHA256
+  `4233c90f57b6cbc6437bdb655f124ab8603837e2e12563d2c5e3fd8d7f5094ac`,
+  covering exactly the 55 normalized source records, not unrelated runtime
+  mood/relationship timestamps.
+- File-WAL/SQLite, `tests.conftest.fake_embed_texts` 12-dimensional offline
+  vectors, top-k **5**, rendered context budget **12,000 characters**.
+- Windows `Windows-11-10.0.26200-SP0`,
+  `Intel64 Family 6 Model 183 Stepping 1, GenuineIntel`.
+
+Both paths are warmed and measured on the same immutable catalog/query order.
+The baseline is the previous read-only raw-memory hybrid provider; the candidate
+adds the existing query manager's native graph/consolidated/archive evidence.
+Binary nDCG credits each relevant summary once and excludes metadata-only
+matches. Supplemental recall gates prevent the exact forms from hiding missing
+source groups. The table reports the final fingerprint-guarded owning-module
+run; the unfiltered release also passed the same quality gates, with candidate
+p95 **75.191 ms** against baseline **79.754 ms**.
+
+| Measure | Paired baseline | Candidate | Gate |
+| --- | --- | --- | --- |
+| Recall@5 | 0.866667 | **0.886275** | >= 0.85 |
+| nDCG@5 | 0.858621 | **0.874182** | >= 0.80 |
+| p95 retrieval | 76.539 ms | **90.779 ms** | <= 91.847 ms and <= 200 ms |
+| Exact recall / nDCG | 1.0 / 1.0 | **1.0 / 1.0** | No exact-fact loss |
+| Paraphrase recall / nDCG | 0.42 / 0.378969 | **0.42 / 0.365712** | Report separately |
+| Graph recall / nDCG | 0.0 / 0.0 | **1.0 / 0.815465** | Recall 1.0 |
+| Cross-session, supersession, archive recall / nDCG | 0.0 / 0.0 | **1.0 / 1.0** each | Recall 1.0 |
+
+Neither irrelevant query receives evidence; superseded facts are excluded.
+Tenant-collision tests use independent populated canonical catalogs. Ledger
+equality checks verify that observation/degradation/concurrent reads do not
+publish authority or access updates.
+
+This aggregate is dominated by exact forms. The weak offline embeddings leave
+paraphrase recall at **42%**, and paraphrase nDCG is slightly lower than baseline.
+These results do not establish general semantic quality, live-model quality,
+general historical/correction semantics, or parity with another memory product.
+
+### Implemented observation contract
+
+[MemoryQueryManager](../dadbot/managers/memory_query.py) preserves the ordinary
+`retrieve_context` access-recording/model-selection behavior by default.
+`record_access=False` uses committed tenant snapshots and the existing
+semantic/BM25 ranker, qualifies native graph evidence against query entities,
+deduplicates summaries, and checks catalog/graph revisions. Read-only ranking
+keeps each query's scores and revision local rather than consuming shared
+last-query diagnostics. Graph read/sync results expose the verified revision
+without relaxing stale-runtime fences.
+
+[The bridge](../dadbot/runtime/semantic_memory_bridge.py) carries content-derived
+source IDs, tenant/revision, available raw provenance, timestamps, conflicts,
+source metadata, and edge validity. It rejects malformed bundles, missing IDs,
+and foreign tenant rows. Consolidated/archive schemas lack complete raw-fact
+provenance; no lineage is fabricated. Embedding failure is visibly degraded,
+and legacy adapter fallbacks are explicitly degraded. Revoked authority,
+corrupt WALs, and changed revisions are errors, not empty successful recall.
+After corruption, the ledger remains blocked until a full verified backend
+reload; the corruption test restores its owned WAL and performs that reload.
+
+[The pruner](../dadbot/runtime/context_pruner.py) enforces the complete rendered
+budget, including identity/task/headings, drops entire evidence entries and
+corresponding reflection signals, reports dropped snippets, and rejects pinned
+inputs that cannot fit. Recall remains anchored to the initial goal while the
+latest reply and system observation remain available in the rendered task.
+Default executive startup notes enter the task before pruning; custom/disabled
+observation hooks retain their prior composition contract. A regression test
+first reproduced an oversized startup prefix escaping the budget, then verified
+both bounded startup rendering and explicit pre-dispatch refusal when pinned
+goal/startup text alone cannot fit.
+The facade's default top-k intentionally changes **3 -> 5**.
+
+| Entry point | Evidence |
+| --- | --- |
+| Default interactive `AssistantRuntime.run_agent_loop` | Two real canonical completions with native observation and kernel source/revision/provenance |
+| Opt-in durable loop | Same populated-catalog checks with stable signed receipts |
+| Canonical resume | Interrupt before the second dispatch; continue with preserved initial goal and native evidence |
+| Queued proactive trigger | Actual canonical dispatch with native observation/kernel evidence |
+| Heartbeat dispatch | Same evidence through heartbeat processing |
+| Disabled memory observation / custom hook | Default observation provider bypassed before dispatch |
+| Raw `AgentDriverLoop` | Remains explicitly hook-controlled; no global default injection |
+
+Observation opt-outs do not bypass canonical kernel integrity checks. Actual
+File-WAL agent-loop turns now use positive committed tenant-revision evidence in
+subconscious retrieval, rather than requiring sovereign checksum fields that
+the normalized memory schema does not retain. The path checks turn/evidence
+ownership and publishes derived source IDs/revision/provenance; it never
+fabricates sovereign checksums. Ordinary/non-file integrity behavior remains
+unchanged.
+
+### Validation and boundaries
+
+The final owning-module and dependent authority/recovery selection passed:
+**334 passed, 16 skipped, zero failures** in **211.37 seconds**. It includes
+the benchmark, populated-catalog ingresses, corruption/revocation refusal,
+overlapping read-only queries, tenant collisions, stale graph refusal, staged
+memory isolation, process-exit index recovery, and canonical loop resume.
+The 16 skips are 13 slow/stress memory cases and three live Ollama embedding cases.
+
+The broader selection exposed and corrected a diagnostic summary leak, stale
+test interception of the old retrieval call, graph read/sync result inconsistency,
+and corruption-test teardown without a verified reload. Additional kernel
+evidence assertions accommodate the existing canonical "shared that" summary
+normalization while requiring the original provenance evidence.
+Editor diagnostics report no errors in the changed observation modules.
+New benchmark/test syntax/import lint checks pass; existing ranker/adapter
+complexity and other lint debt are not a clean whole-module lint certification.
+
+The final runtime's unfiltered default release passed on November 13, 2026:
+**4,812 passed, 124 skipped, 10 expected failures, zero failures** in
+**3,632.18 seconds**. The unchanged scale gates passed at **68.708 s / 120 s**
+(110 turns), **13.681 s / 60 s** (eight concurrent sessions), and
+**5.761 s / 30 s** (exact pruning count), from JUnit.
+
+The first broad observation run produced **4,805 passed, five failures,
+124 skipped, 10 expected failures** in **5,800.06 seconds**. All five failures
+were WebSocket ticket validation cases returning 401 instead of their expected
+403/422. Those fixtures mint one-hour tokens at collection, and the run recorded
+a **4,810.73-second normalization-test teardown**, consistent with expiry before
+ticket tests ran. The ticket module passed alone (**30 passed, one service skip**).
+An unchanged unfiltered rerun passed **4,810 tests**, with **124 skipped** and
+**10 expected failures**, in **984.73 seconds**. No authentication code or ticket
+fixtures were changed. The startup budget regression was then fixed and verified
+with **88 owning-module tests, zero skips**, followed by the final unfiltered
+run above.
+
+The final run also recorded an unexplained **2,656.70-second durable-ingress
+case**; the focused case completed in about four seconds. These wall-time stalls
+are recorded, not explained away or used to claim end-to-end loop latency
+certification. The retrieval p95 measurements and scale limits above are
+separate measured gates.
+
+After that full run, only benchmark evidence generation changed: its hash now
+covers the actual 55-record corpus and asserts its fixed fingerprint instead of
+hashing unrelated runtime timestamps. Canonical WAL comparison verified identical
+50 raw, four consolidated, and one archive records across the November 12/13
+runs. The final test files then passed together: **88 passed, zero skips** in
+**64.63 seconds**, including the fixed fingerprint, quality/latency thresholds,
+all ingress cases, and startup-budget checks. No runtime code changed after the
+successful final full run. Focused test lint, production syntax/import checks,
+editor diagnostics, and `git diff --check` passed within the limits stated above.
+
+The 124 skips retain the earlier breakdown: 36 PostgreSQL/PGVector, six Redis,
+six live-model, one optional `litellm` collection, two production Compose,
+71 slow/stress, and two quarantined cases. The 10 expected failures are separate.
+PostgreSQL/Redis/PGVector, non-SQLite physical projections, authenticated
+PostgreSQL execution, non-file loop resume, and live-model checks retain their
+previous explicit certification limits.
 
 ## 3. Make loop progress truthful and durable
 
@@ -363,9 +610,10 @@ must be measured; merely checking that the provider was called is insufficient.
   The successful post-turn path persists a bounded, versioned board plus its
   tenant/session/trace/job/request/run/turn identity in canonical session state.
   `AssistantRuntime` restores only state matching the active tenant and session.
-- The persisted schema covers the accepted goal board and last commit identity,
-  not unresolved blockers or a resumable execution cursor. It is not a second
-  world-model database and does not authorize replay or resend.
+- The persisted goal schema covers the accepted board and last commit identity.
+  Opt-in File-WAL runs additionally commit a bounded cursor, pending request
+  marker, policy/input binding, and remaining budgets through the kernel gateway.
+  This is not a second world-model database and never authorizes uncertain resend.
 - Agent-loop completion metadata now carries at most 16 hash/status/tool identity
   summaries from checksum-validated tool events for the current trace. The
   canonical `JOB_COMPLETED` lookup feeds them into the next reflection as
@@ -387,8 +635,9 @@ must be measured; merely checking that the provider was called is insufficient.
   least 32 bytes; the default process-random signer is explicitly unavailable
   for durable evidence.
 - Receipts establish signed stage/checkpoint-chain evidence, not goal
-  postcondition success. Partial-loop resume, receipt-backed outcome
-  reconciliation, and key rotation remain open.
+  postcondition success. Partial File-WAL loops can resume after re-verifying
+  canonical completion evidence; uncertain external-effect reconciliation,
+  deterministic postconditions, and key rotation remain open.
 - Use bounded retry/escalation policies that distinguish definitely-undispatched
   work from uncertain external effects.
 - Feed observed outcomes and consolidation status into the next reflection;
@@ -397,9 +646,9 @@ must be measured; merely checking that the provider was called is insufficient.
   tool-recording, recovery, and receipt tests passed with isolated pytest
   temporary storage. Targeted Ruff checks and `git diff --check` passed; the
   broader lint selection still reports existing diagnostics in legacy files.
-  The full suite was not rerun for this change; deterministic postcondition
-  checks, partial-loop recovery, and supported adapter certification remain
-  open.
+  The full suite was not rerun for this change. Deterministic postcondition
+  checks, non-file loop recovery, and non-SQLite physical projection
+  certification remain open; supported-profile acceptance evidence is above.
 
 ### Execution boundary
 
@@ -579,9 +828,13 @@ Not included: kernel rewrites, a new agent framework, wholesale memory-store
 replacement, unbounded autonomy, policy self-modification, or claims of parity
 with another product without a shared benchmark.
 
-Current execution step: milestone 1 remains open, with the first canonical
-goal-state recovery path implemented. Next, reconcile tool receipts and
-postconditions, add safe recovery for interrupted loops, and certify
-non-SQLite adapters. A synchronized File-WAL/SQLite multi-process rebuild
-scenario is now covered; standalone loop snapshots remain diagnostics, not
-replay authority.
+Current execution step: the supported File-WAL/SQLite authority/recovery paths
+and selected PostgreSQL/Redis primitives now have executed acceptance evidence.
+Opt-in File-WAL loop recovery is wired to canonical completion receipts.
+Do not promote authenticated PostgreSQL, non-SQLite physical memory projections,
+non-file loop resume, or live-model behavior to certified status.
+Milestone 2's synthetic File-WAL/SQLite quality, bounded evidence, default ingress,
+and final-runtime unfiltered release gates now pass. Next is milestone 3:
+goal postconditions, uncertain-effect reconciliation, and key rotation.
+Service-dependent and other skipped capabilities retain the explicit limits
+recorded above; unexplained long wall-time stalls are not latency certification.

@@ -262,4 +262,33 @@ def test_hybrid_recall_falls_back_to_semantic_snippets():
     recall = build_hybrid_memory_recall_provider(kernel, sync_index=False)("tea")
 
     assert recall.snippets == ["[food] Likes tea"]
-    assert recall.signals == {"conflicts": [], "temporal": []}
+    assert recall.signals == {
+        "conflicts": [], "temporal": [],
+        "retrieval": {"status": "degraded", "reason": "hybrid_query_unavailable"},
+    }
+
+
+@pytest.mark.parametrize("fault", ["foreign_tenant", "missing_source", "malformed_bundle"])
+def test_native_context_errors_cannot_be_relabelled_as_successful_recall(fault):
+    kernel = _Kernel([])
+    payload = {"summary": "tea"}
+    bundle = [{"type": "semantic", "source_id": "tea", "payload": payload}]
+    if fault == "foreign_tenant":
+        payload["tenant_id"] = TENANT_B
+    elif fault == "missing_source":
+        bundle[0]["source_id"] = ""
+    else:
+        bundle = None
+    kernel.memory_query = SimpleNamespace(
+        retrieve_context=lambda *_args, **_kwargs: {
+            "bundle": bundle, "retrieval_status": {"status": "ok", "authority_revision": None},
+        },
+    )
+    from dadbot_system.security import AuthorizationError
+    expected = {
+        "foreign_tenant": AuthorizationError,
+        "missing_source": ValueError,
+        "malformed_bundle": TypeError,
+    }
+    with pytest.raises(expected[fault]):
+        build_hybrid_memory_recall_provider(kernel)("tea")

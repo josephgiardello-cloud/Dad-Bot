@@ -371,7 +371,75 @@ Local-WAL graph refresh reads committed tenant sources even when runtime state h
 
 The install script will guide you through the rest.
 
+### Experimental agent-loop recovery
+
+`AssistantRuntime.run_agent_loop(..., durable=True)` opts into a bounded,
+ledger-backed cursor on an fsync-enabled File-WAL installation. It requires
+the stable receipt key described above. After an interruption, call
+`run_agent_loop(..., resume=True)` with the same initial input, session, and
+`DriverLoopPolicy`. Restore the intended observation/reflection hooks explicitly;
+callables are not persisted.
+
+Recovery verifies the exact canonical completion, receipt signatures, trace,
+stage order, and chain before continuing with the remaining turn/failure/no-op
+budgets. A pending dispatch without valid completion evidence blocks both resume
+and new loop runs: it is never automatically resent. Completed runs return their
+recorded counters without calling the model or executing another turn. Returned
+records describe only this invocation; counters include recovered committed
+turns. Cursor action/system-observation text is bounded to 16,384 characters.
+
+The cursor is a `SESSION_STATE_UPDATED` projection, not a standalone loop
+snapshot. Local snapshots remain diagnostics and are neither imported nor used
+to authorize replay. Same-tenant/session File-WAL loop runs share a cross-process
+claim; the WAL lock is not held across canonical execution. Signed stage receipts
+prove execution-chain integrity, not goal postconditions.
+
+PostgreSQL/Redis primitive integration tests do not enable non-file loop resume.
+Authenticated PostgreSQL execution remains unsupported, and non-SQLite physical
+memory projection recovery is not certified. Receipt-key rotation and uncertain
+external-effect reconciliation require separate work.
+
 ### Memory retrieval and performance
+
+The default `AssistantRuntime` observation hook now uses
+`retrieve_context(..., record_access=False)` with `semantic_top_k=5` (previously
+3) and a 12,000-character rendered context budget. Interactive loops, opt-in
+durable loops, canonical resume, queued proactive triggers, and heartbeat
+dispatches have populated-catalog integration coverage. The initial goal remains
+the recall query across generic follow-up replies.
+
+File-WAL observation combines the existing semantic/BM25 ranking with relevant
+graph, consolidated, and archive evidence from a revision-fenced committed
+tenant catalog. It does not update access counters, call a model to select
+consolidated memories, or publish memory changes. Snippets carry content-derived
+source IDs, tenant/revision, available provenance, timestamps, conflict references,
+and graph edge validity. Consolidated/archive schemas do not provide full raw-fact
+lineage; absent provenance is not invented.
+
+The pruner counts the entire rendered context, including identity, task, and
+headings and executive startup task notes. It drops whole evidence entries and
+their reflection signals rather than cutting provenance fragments, and reports
+dropped snippets. If pinned
+identity/task text alone exceeds the budget, it raises explicitly. Missing,
+corrupt, revoked, or conflicting authority is an error, not empty recall.
+Embedding unavailability uses visibly degraded lexical/graph retrieval; legacy
+adapters without the native bundle also report degraded status.
+
+`enable_semantic_memory=False` and a custom `observation_hook` opt out of the
+default observation hook. Raw `AgentDriverLoop` construction remains
+hook-controlled. These options do not bypass canonical kernel memory validation:
+File-WAL agent-loop dispatches use read-only tenant-revision evidence instead of
+the legacy sovereign-checksum handshake. Ordinary/non-file turns retain their
+existing integrity path.
+
+The versioned `memory-observation.v1` synthetic File-WAL/SQLite profile uses
+55 records, 257 queries, deterministic offline embeddings, and a frozen
+2026-11-12 query clock. It measured recall@5 **0.8863**, nDCG@5 **0.8742**, and
+p95 **90.78 ms**, below both 1.20 times its paired **76.54 ms** baseline and
+200 ms. Exact-fact recall/nDCG remained 1.0; paraphrase recall was only 0.42.
+This is local-profile evidence, not live-model or non-SQLite adapter certification.
+See [the hardening plan](docs/AGENT_MEMORY_PLAN.md#2-certify-memory-first-observation)
+for subgroup results and remaining limits.
 
 Memory retrieval records catalog and candidate counts, stage durations, index
 pending/degraded status, and reranker timing in
@@ -938,7 +1006,7 @@ Anything beyond those lanes should be treated as supplemental, not mandatory.
 | Voice | Partial; full-duplex streaming is not certified | `dadbot/speech/voice_loop.py`, `dadbot/ui/media/service.py` |
 | Reminders and calendar | Local events available; feed sync is partial | `dadbot/agentic.py`, `dadbot/core/boot_mixin.py` |
 | Proactive check-ins | Partial | `dadbot/core/boot_mixin.py` |
-| Agent Driver Loop | Experimental API; uses hybrid memory with conflict and timestamp signals, structured reflection, a pre-dispatch plan gate, ledger-recorded goal state, and bounded heartbeat-triggered turns; consolidation remains post-commit | `dadbot/runtime/agent_driver_loop.py`, unit and integration tests |
+| Agent Driver Loop | Experimental API; hybrid memory, structured reflection, pre-dispatch plan gate, canonical goal state, and opt-in receipt-verified File-WAL resume; consolidation remains post-commit | `dadbot/runtime/agent_driver_loop.py`, `dadbot/core/agent_loop_recovery.py`, unit and integration tests |
 | Avatar rendering | Partial | `dad_streamlit.py`, optional `heritage` dependencies |
 
 Streamlit chat uses the canonical turn path. Restart durability depends on the

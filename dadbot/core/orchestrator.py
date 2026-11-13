@@ -1416,6 +1416,12 @@ class DadBotOrchestrator:
         bot = self.bot
         if bot is None:
             return
+        memory_manager = getattr(bot, "memory_manager", None)
+        storage = getattr(memory_manager, "_storage", None)
+        local_backend = getattr(storage, "_local_authority_backend", None)
+        if context.metadata.get("agent_loop") and callable(local_backend) and local_backend() is not None:
+            self._run_canonical_loop_memory_retrieval(context, user_input)
+            return
         memory_catalog = getattr(bot, "memory_catalog", None)
         semantic_matches = getattr(bot, "semantic_memory_matches", None)
         if not callable(memory_catalog) or not callable(semantic_matches):
@@ -1486,6 +1492,44 @@ class DadBotOrchestrator:
             "dropped_integrity": dropped_integrity,
             "max_age_days": 180,
             "similarity_threshold": 0.2,
+        }
+
+    def _run_canonical_loop_memory_retrieval(self, context: TurnContext, user_input: str) -> None:
+        if context.metadata.get("tenant_id") != self.bot.config.tenant_id:
+            raise RuntimeError("Canonical loop memory tenant does not match the turn owner")
+        bundle = self.bot.memory_query.retrieve_context(
+            user_input, strategy="hybrid", limit=5, record_access=False,
+        )
+        revision = bundle["retrieval_status"]["authority_revision"]
+        if type(revision) is not int or revision < 1:
+            raise RuntimeError("Canonical loop memory requires a committed tenant revision")
+        fragments = []
+        for item in bundle["bundle"]:
+            memory = item["payload"]
+            if memory.get("tenant_id", self.bot.config.tenant_id) != self.bot.config.tenant_id:
+                raise RuntimeError("Canonical loop memory evidence belongs to another tenant")
+            source_id = item["source_id"]
+            if not isinstance(source_id, str) or not source_id:
+                raise RuntimeError("Canonical loop memory requires an evidence source ID")
+            fragments.append({
+                "memory_id": source_id, "summary": memory["summary"],
+                "category": memory.get("category", "general"),
+                "mood": memory.get("mood", "neutral"),
+                "timestamp": memory.get("event_time") or memory.get("updated_at") or memory.get("created_at"),
+                "source": "canonical_tenant_memory",
+                "tenant_id": self.bot.config.tenant_id,
+                "authority_revision": revision,
+                "provenance": memory.get("provenance"),
+                "source_metadata": memory.get("source_metadata", {}),
+                "validity": memory.get("validity", []),
+                "contradictions": list(memory.get("contradictions") or []),
+            })
+        context.state["subconscious_memory_fragments"] = fragments
+        context.state["memory_retrieval_set"] = fragments
+        context.metadata["subconscious_retrieval"] = {
+            "query": user_input, "retrieved": len(fragments),
+            "source": "canonical_tenant_memory",
+            **bundle["retrieval_status"],
         }
 
     async def _execute_job(

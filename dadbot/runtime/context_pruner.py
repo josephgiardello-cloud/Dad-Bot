@@ -11,6 +11,7 @@ Usage:
 
 from __future__ import annotations
 
+import json
 from dataclasses import dataclass
 from typing import Any
 
@@ -25,6 +26,7 @@ class PrunedContext:
     total_chars: int
     dropped_turns: int
     strategy: str
+    dropped_snippets: int = 0
 
 
 @dataclass(slots=True)
@@ -92,6 +94,8 @@ class ContextWindowPruner:
         core_identity: str,
         turn_dicts: list[dict[str, Any]],
         relevant_snippets: list[str] | None = None,
+        *,
+        current_task: str = "",
     ) -> PrunedContext:
         """Assemble the final context string within the character budget.
 
@@ -121,14 +125,28 @@ class ContextWindowPruner:
         dropped = len(turn_dicts) - len(kept)
         strategy = f"last_{self.max_turns}_turns_char_budget_{self.max_chars}"
 
-        return PrunedContext(
+        context = PrunedContext(
             core_identity=str(core_identity or ""),
             turns=kept,
             relevant_snippets=snippets,
             total_chars=identity_chars + chars_used + snippet_chars,
             dropped_turns=dropped,
             strategy=strategy,
+            dropped_snippets=len(relevant_snippets or []) - len(snippets),
         )
+        rendered = self._render_for_llm(context, current_task=current_task)
+        while len(rendered) > self.max_chars:
+            if context.turns:
+                context.turns.pop(0)
+                context.dropped_turns += 1
+            elif context.relevant_snippets:
+                context.relevant_snippets.pop()
+                context.dropped_snippets += 1
+            else:
+                raise ValueError("Core identity and current task exceed the context character budget")
+            rendered = self._render_for_llm(context, current_task=current_task)
+        context.total_chars = len(rendered)
+        return context
 
     def format_for_llm(
         self,
@@ -136,7 +154,14 @@ class ContextWindowPruner:
         *,
         current_task: str = "",
     ) -> str:
-        """Render a PrunedContext into the text that goes into the LLM prompt."""
+        """Render a context whose complete identity and task fit the hard budget."""
+        text = self._render_for_llm(ctx, current_task=current_task)
+        if len(text) > self.max_chars:
+            raise ValueError("Rendered context exceeds the context character budget")
+        return text
+
+    @staticmethod
+    def _render_for_llm(ctx: PrunedContext, *, current_task: str = "") -> str:
         lines: list[str] = []
 
         # Core identity block
@@ -145,8 +170,9 @@ class ContextWindowPruner:
         lines.append("")
 
         # Relevant memory snippets
-        if ctx.relevant_snippets:
-            lines.append("=== RELEVANT MEMORY ===")
+        if ctx.relevant_snippets or ctx.dropped_snippets:
+            dropped = f" ({ctx.dropped_snippets} evidence entries dropped)" if ctx.dropped_snippets else ""
+            lines.append(f"=== RELEVANT MEMORY{dropped} ===")
             for i, s in enumerate(ctx.relevant_snippets, 1):
                 lines.append(f"[{i}] {s.strip()}")
             lines.append("")
@@ -201,17 +227,17 @@ def build_pruned_observation_hook(
         initial = str(ctx.get("initial_observation") or "")
         system_observation = str(ctx.get("system_observation") or "").strip()
         current_task = "\n\n".join(
-            part for part in (system_observation, last_reply or initial) if part
+            part for part in dict.fromkeys((initial, system_observation, last_reply)) if part
         )
 
         snippets: list[str] = []
         ctx["memory_signals"] = {"conflicts": [], "temporal": []}
         if callable(snippet_provider) and current_task:
             if strict_snippets:
-                provided = snippet_provider(current_task)
+                provided = snippet_provider(initial or current_task)
             else:
                 try:
-                    provided = snippet_provider(current_task)
+                    provided = snippet_provider(initial or current_task)
                 except Exception:
                     provided = None
 
@@ -221,8 +247,31 @@ def build_pruned_observation_hook(
             else:
                 snippets = list(provided or [])
 
+        identity = core_identity
+        retrieval_status = ctx["memory_signals"].get("retrieval")
+        if retrieval_status:
+            identity = (
+                f"{identity}\n=== MEMORY RETRIEVAL ===\n"
+                f"{json.dumps(retrieval_status, sort_keys=True, ensure_ascii=True)}"
+            )
         turn_dicts = pruner.prune(records)
-        ctx_obj = pruner.build_context_text(core_identity, turn_dicts, snippets)
+        ctx_obj = pruner.build_context_text(identity, turn_dicts, snippets, current_task=current_task)
+        evidence = ctx["memory_signals"].get("evidence")
+        if isinstance(evidence, list):
+            kept_count = len(ctx_obj.relevant_snippets)
+            ctx["memory_signals"]["evidence"] = evidence[:kept_count]
+            ctx["memory_signals"]["pruning"] = {
+                "retrieved": len(evidence), "kept": kept_count, "dropped": len(evidence) - kept_count,
+            }
+            kept_text = "\n".join(ctx_obj.relevant_snippets)
+            ctx["memory_signals"]["temporal"] = [
+                item for item in ctx["memory_signals"].get("temporal", [])
+                if item.get("summary") and item["summary"] in kept_text
+            ]
+            ctx["memory_signals"]["conflicts"] = [
+                item for item in ctx["memory_signals"].get("conflicts", [])
+                if item.get("left") in kept_text and item.get("right") in kept_text
+            ]
         return pruner.format_for_llm(ctx_obj, current_task=current_task)
 
     return observation_hook

@@ -325,6 +325,7 @@ class TestResponseEngineControlPlaneIntegration:
         job.trace_id = "trace-1"
         job.metadata = {"execution_result": {"status": "running"}, "tenant_id": "tenant-response-engine"}
         job.job_id = "job-1"
+        job.tenant_id = "tenant-response-engine"
 
         with authorized_kernel_scope("session-1"):
             result = cp._finalize_submit_success(
@@ -420,6 +421,7 @@ class TestResponseEngineControlPlaneIntegration:
         job.trace_id = "trace-1"
         job.metadata = {"execution_result": {"status": "running"}, "tenant_id": "tenant-response-engine"}
         job.job_id = "job-1"
+        job.tenant_id = "tenant-response-engine"
 
         with authorized_kernel_scope("session-1"):
             _ = cp._finalize_submit_success(
@@ -615,6 +617,7 @@ class TestResponseEngineControlPlaneIntegration:
         job.trace_id = "trace-1"
         job.metadata = {"execution_result": {"status": "running"}, "tenant_id": "tenant-response-engine"}
         job.job_id = "job-1"
+        job.tenant_id = "tenant-response-engine"
 
         with authorized_kernel_scope("session-1"):
             _ = cp._finalize_submit_success(
@@ -680,6 +683,7 @@ class TestResponseEngineControlPlaneIntegration:
             "tenant_id": "tenant-response-engine",
         }
         job.job_id = "job-identity-1"
+        job.tenant_id = "tenant-response-engine"
 
         with authorized_kernel_scope("session-identity"):
             result = cp._finalize_submit_success(
@@ -777,6 +781,7 @@ class TestResponseEngineControlPlaneIntegration:
                 "tenant_id": tenant_id,
             }
             job.job_id = f"job-phase3-{turn}"
+            job.tenant_id = tenant_id
 
             cp._finalize_submit_success(
                 job=job,

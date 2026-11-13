@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from typing import Any
@@ -215,35 +216,12 @@ def build_hybrid_memory_snippet_provider(
     session_id: str = "default",
     sync_index: bool = False,
 ) -> Any:
-    """Use the kernel's hybrid memory query for loop observations."""
-    query_manager = getattr(kernel, "memory_query", None)
-    retrieve = getattr(query_manager, "relevant_memories_for_input", None)
-    if not callable(retrieve):
-        return build_semantic_snippet_provider(
-            kernel,
-            top_k=top_k,
-            session_id=session_id,
-            sync_index=sync_index,
-        )
+    """Expose the same evidence path as the structured observation provider."""
+    recall = build_hybrid_memory_recall_provider(
+        kernel, top_k=top_k, session_id=session_id, sync_index=sync_index,
+    )
 
-    limit = max(1, int(top_k))
-    indexer = MemoryIndexer(kernel, session_id=str(session_id or "default"))
-
-    def provide(query: str) -> list[str]:
-        indexer._authorize()
-        if sync_index:
-            indexer.sync()
-        memories = retrieve(_safe_str(query), limit=limit, record_access=False)
-        memories = _dict_rows([] if memories is None else memories, source="Hybrid memory results")
-        snippets: list[str] = []
-        for memory in memories:
-            summary = _safe_str(memory.get("summary"))
-            if summary:
-                category = _safe_str(memory.get("category") or "general")
-                snippets.append(f"[{category}] {summary}")
-        return snippets[:limit]
-
-    return provide
+    return lambda query: recall(query).snippets
 
 
 def build_hybrid_memory_recall_provider(
@@ -256,7 +234,8 @@ def build_hybrid_memory_recall_provider(
     """Return hybrid memories with bounded conflict and timestamp signals."""
     query_manager = getattr(kernel, "memory_query", None)
     retrieve = getattr(query_manager, "relevant_memories_for_input", None)
-    if not callable(retrieve):
+    retrieve_context = getattr(query_manager, "retrieve_context", None)
+    if not callable(retrieve) and not callable(retrieve_context):
         snippets = build_semantic_snippet_provider(
             kernel,
             top_k=top_k,
@@ -267,7 +246,10 @@ def build_hybrid_memory_recall_provider(
         def provide_semantic_recall(query: str) -> MemoryRecall:
             return MemoryRecall(
                 snippets=list(snippets(query) or []),
-                signals={"conflicts": [], "temporal": []},
+                signals={
+                    "conflicts": [], "temporal": [],
+                    "retrieval": {"status": "degraded", "reason": "hybrid_query_unavailable"},
+                },
             )
 
         return provide_semantic_recall
@@ -279,6 +261,10 @@ def build_hybrid_memory_recall_provider(
         indexer._authorize()
         if sync_index:
             indexer.sync()
+        if callable(retrieve_context):
+            context = retrieve_context(_safe_str(query), strategy="hybrid", limit=limit, record_access=False)
+            return _recall_from_context(kernel, indexer, context, limit)
+
         memories = retrieve(_safe_str(query), limit=limit, record_access=False)
         memories = _dict_rows([] if memories is None else memories, source="Hybrid memory results")[:limit]
 
@@ -288,15 +274,56 @@ def build_hybrid_memory_recall_provider(
             if summary:
                 category = _safe_str(memory.get("category") or "general")[:80]
                 snippets.append(f"[{category}] {summary}")
-        return MemoryRecall(
-            snippets=snippets,
-            signals=_memory_signals(kernel, memories),
-        )
+        signals = _memory_signals(kernel, memories)
+        signals["retrieval"] = {"status": "degraded", "reason": "context_bundle_unavailable"}
+        return MemoryRecall(snippets=snippets, signals=signals)
 
     return provide_hybrid_recall
 
 
-def _memory_signals(kernel: Any, memories: list[dict[str, Any]]) -> dict[str, Any]:
+def _recall_from_context(kernel: Any, indexer: MemoryIndexer, context: object, limit: int) -> MemoryRecall:
+    from dadbot_system.security import AuthorizationError
+
+    if not isinstance(context, dict) or not isinstance(context.get("retrieval_status"), dict):
+        raise TypeError("Read-only memory context must expose its retrieval status")
+    bundle = _dict_rows(context.get("bundle"), source="Memory context bundle")[:limit]
+    memories = _dict_rows([item.get("payload") for item in bundle], source="Memory context evidence")
+    indexer._authorize()
+    evidence = []
+    snippets = []
+    for item, memory in zip(bundle, memories, strict=True):
+        if memory.get("tenant_id", indexer.tenant_id) != indexer.tenant_id:
+            raise AuthorizationError("Memory context evidence belongs to another tenant")
+        source_id = item.get("source_id")
+        if not isinstance(source_id, str) or not source_id.strip():
+            raise ValueError("Memory context evidence requires a source ID")
+        metadata = {
+            "source_id": source_id, "source_type": memory.get("source_type", item["type"]),
+            "tenant_id": indexer.tenant_id,
+            "authority_revision": context["retrieval_status"].get("authority_revision"),
+            "provenance": memory.get("provenance"),
+            "temporal": {
+                name: memory[name] for name in ("event_time", "created_at", "updated_at")
+                if memory.get(name)
+            },
+            "conflicts": list(memory.get("contradictions") or []),
+            "source_metadata": memory.get("source_metadata", {}),
+            "validity": memory.get("validity", []),
+        }
+        evidence.append(metadata)
+        snippets.append(
+            f"[{_safe_str(memory.get('category') or 'general')}] {_safe_str(memory.get('summary'))}\n"
+            f"Evidence: {json.dumps(metadata, sort_keys=True, ensure_ascii=True)}"
+        )
+    signals = _memory_signals(kernel, memories, insights=context.get("consolidated_memories", []))
+    signals.update(evidence=evidence, retrieval=dict(context["retrieval_status"]))
+    indexer._authorize()
+    return MemoryRecall(snippets=snippets, signals=signals)
+
+
+def _memory_signals(
+    kernel: Any, memories: list[dict[str, Any]], *, insights: list[dict[str, Any]] | None = None,
+) -> dict[str, Any]:
     temporal: list[dict[str, str]] = []
     timestamp_fields = ("event_time", "created_at", "updated_at", "last_reinforced_at")
     for memory in memories[:4]:
@@ -321,7 +348,8 @@ def _memory_signals(kernel: Any, memories: list[dict[str, Any]]) -> dict[str, An
     if callable(detect) and memories:
         insight_reader = getattr(kernel, "consolidated_memory_catalog", None)
         insights = _dict_rows(
-            insight_reader() if callable(insight_reader) else [], source="Consolidated memory catalog",
+            insights if insights is not None else (insight_reader() if callable(insight_reader) else []),
+            source="Consolidated memory catalog",
         )[-8:]
         findings = _dict_rows(detect(memories, insights), source="Memory contradictions")
         for finding in findings[:3]:

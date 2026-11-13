@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from copy import deepcopy
 from types import SimpleNamespace
 from unittest.mock import Mock
 
@@ -8,9 +9,9 @@ import pytest
 from dadbot.core.agent_loop_progress import (
     AgentLoopCommitIdentity,
     apply_committed_agent_loop_progress,
-    reconcile_committed_agent_loop_progress,
     read_agent_loop_goal_blackboard,
     read_agent_loop_tool_outcome_evidence,
+    reconcile_committed_agent_loop_progress,
 )
 from dadbot.core.control_plane_post_turn import _apply_submit_success_postprocessing_impl
 
@@ -284,6 +285,42 @@ def test_rejects_malformed_committed_goal_updates():
                 job_id="job-2",
             ),
         )
+
+
+def test_reconciliation_is_atomic_when_a_later_completion_is_invalid():
+    state = {"unrelated": {"preserved": True}}
+    before = deepcopy(state)
+    entries = []
+    for number, board in ((1, {}), (2, {"status": "stale"})):
+        entries.append({
+            "tenant_id": "tenant-a", "session_id": "session-a",
+            "request_id": f"request-{number}", "job_id": f"job-{number}",
+            "trace_id": f"trace-{number}",
+            "metadata": {"agent_loop": {
+                "schema_version": 1, "loop_run_id": "run", "turn_index": number,
+                "goal_blackboard": board, "goal_updates": {"status": "advanced"},
+            }},
+        })
+    with pytest.raises(ValueError, match="stale goal snapshot"):
+        reconcile_committed_agent_loop_progress(
+            state, completed_entries=entries, tenant_id="tenant-a", session_id="session-a",
+        )
+    assert state == before
+
+
+def test_committed_updates_cannot_relabel_foreign_progress():
+    state = {"agent_loop_progress": _progress(tenant_id="tenant-b")}
+    before = deepcopy(state)
+    with pytest.raises(ValueError, match="different tenant"):
+        apply_committed_agent_loop_progress(
+            state,
+            metadata={"request_id": "request-2", "agent_loop": {
+                "schema_version": 1, "loop_run_id": "run", "turn_index": 2,
+                "goal_updates": {"status": "advanced"},
+            }},
+            identity=AgentLoopCommitIdentity("tenant-a", "session-a", "trace-2", "job-2"),
+        )
+    assert state == before
 
 
 def test_success_post_turn_persists_agent_loop_progress_through_session_state_merge():

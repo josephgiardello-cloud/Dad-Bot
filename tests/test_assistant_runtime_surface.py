@@ -291,11 +291,12 @@ def test_run_agent_loop_wires_semantic_memory_observation_hook():
     result = assistant.run_agent_loop("hello", enable_semantic_memory=True)
 
     assert result.completed_turns >= 1
-    assert kernel.hybrid_memory_queries == [("hello", 3)]
+    assert kernel.hybrid_memory_queries == [("hello", 5)]
     assert "[general] hello" in kernel.reflection_payloads[0]["observation"]
     assert kernel.reflection_payloads[0]["memory_signals"] == {
         "conflicts": [],
         "temporal": [],
+        "retrieval": {"status": "degraded", "reason": "context_bundle_unavailable"},
     }
     assert result.goal_blackboard == {"status": "started"}
 
@@ -307,6 +308,25 @@ def test_run_memory_consolidation_executes_job():
     payload = assistant.run_memory_consolidation(background=False, force=True)
 
     assert payload["status"] == "written"
+
+
+@pytest.mark.parametrize("goal_size", [100, 11700])
+def test_default_observation_budgets_executive_startup_tasks(monkeypatch, goal_size):
+    kernel = _FakeKernel()
+    assistant = AssistantRuntime(kernel)
+    startup = "Pending executive task: " + "x" * 500
+    monkeypatch.setattr(assistant, "_executive_startup_observation", lambda **_kwargs: startup)
+    goal = "Review " + "g" * goal_size
+    if goal_size == 11700:
+        with pytest.raises(ValueError, match="Core identity and current task exceed"):
+            assistant.run_agent_loop(goal)
+        assert kernel.turn_requests == []
+    else:
+        assistant.run_agent_loop(goal)
+        observation = kernel.reflection_payloads[0]["observation"]
+        assert startup in observation and goal in observation
+        assert len(observation) <= 12000
+        assert kernel.hybrid_memory_queries == [(goal, 5)]
 
 
 def test_executive_startup_observation_formats_pending_tasks(monkeypatch):

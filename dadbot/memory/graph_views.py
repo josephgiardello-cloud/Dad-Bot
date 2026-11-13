@@ -194,15 +194,17 @@ def sync_graph_store(manager, turn_context=None):
     io_lock = getattr(runtime, "_io_lock", None)
     with io_lock if uses_authority and io_lock is not None else nullcontext():
         if uses_authority and storage is not None:
-            revision = storage._tenant_base_revision
-            projection = storage.committed_tenant_projection()
-            if projection is None:
+            expected_revision = storage._tenant_base_revision
+            committed = storage._committed_tenant_snapshot()
+            if committed is None:
                 raise RuntimeError("Local graph sync requires committed tenant memory")
+            revision, projection = committed
             snapshot = build_graph_projection(manager, turn_context=turn_context, store_projection=projection)
+            snapshot["authority_revision"] = revision
         else:
             snapshot = build_graph_projection(manager, turn_context=turn_context)
         fence = (
-            storage.fenced_graph_index_write(revision, projection)
+            storage.fenced_graph_index_write(expected_revision, projection)
             if uses_authority and storage is not None else nullcontext()
         )
         with fence:
@@ -219,13 +221,15 @@ def graph_snapshot(manager):
     local_backend = getattr(storage, "_local_authority_backend", None)
     if storage is not None and callable(local_backend) and local_backend() is not None:
         with manager._bot._io_lock:
-            revision = storage._tenant_base_revision
-            projection = storage.committed_tenant_projection()
-            if projection is None:
+            expected_revision = storage._tenant_base_revision
+            committed = storage._committed_tenant_snapshot()
+            if committed is None:
                 raise RuntimeError("Local graph reads require committed tenant memory")
+            revision, projection = committed
             manager.invalidate_projection_cache()
             snapshot = build_graph_projection(manager, turn_context=None, store_projection=projection)
-            with storage.fenced_graph_index_write(revision, projection):
+            with storage.fenced_graph_index_write(expected_revision, projection):
+                snapshot["authority_revision"] = revision
                 return snapshot
     try:
         manager.ensure_graph_store()
@@ -534,6 +538,16 @@ def graph_retrieval_for_input(manager, query, limit=3):
         "supporting_evidence": [
             {
                 "source_type": node.get("node_type"),
+                "source_id": node.get("source_id"),
+                "source_key": node["node_key"],
+                "source_metadata": dict(node.get("attributes") or {}),
+                "validity": [
+                    {
+                        name: edge.get(name)
+                        for name in ("edge_key", "valid_from", "valid_to", "invalidated_at", "invalidation_reason")
+                    }
+                    for edge in adjacency.get(node["node_key"], [])
+                ],
                 "label": node.get("label", ""),
                 "summary": manager.graph_source_summary(node),
                 "category": str(node.get("category") or "general").strip().lower() or "general",
@@ -549,6 +563,7 @@ def graph_retrieval_for_input(manager, query, limit=3):
             for score, node, matched_labels in selected
         ],
         "updated_at": snapshot.get("updated_at"),
+        "authority_revision": snapshot.get("authority_revision"),
     }
 
 

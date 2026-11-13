@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import re
+from copy import deepcopy
 from dataclasses import dataclass
 from typing import Any
 
@@ -85,7 +86,9 @@ def normalize_tool_outcome_evidence(
         or type(value.get("schema_version")) is not int
         or value["schema_version"] != _SCHEMA_VERSION
         or type(value.get("trace_id")) is not str
-        or not value["trace_id"].strip()
+        or (not value["trace_id"].strip() and (
+            value["trace_id"] != "" or value.get("outcomes") != [] or value.get("truncated") is not False
+        ))
         or type(value.get("outcomes")) is not list
         or len(value["outcomes"]) > _MAX_TOOL_OUTCOMES
         or type(value.get("truncated")) is not bool
@@ -196,6 +199,25 @@ def read_agent_loop_tool_outcome_evidence(
     )
 
 
+def _verify_progress_marker(
+    marker: dict[str, Any], last_committed: dict[str, Any], board: dict[str, str],
+) -> None:
+    metadata = marker.get("metadata")
+    loop = metadata.get("agent_loop") if type(metadata) is dict else None
+    if (
+        marker.get("trace_id") != last_committed["trace_id"]
+        or marker.get("job_id") != last_committed["job_id"]
+        or type(loop) is not dict
+        or loop.get("loop_run_id") != last_committed["loop_run_id"]
+        or loop.get("turn_index") != last_committed["turn_index"]
+    ):
+        raise ValueError("Persisted agent-loop identity does not match canonical completion history")
+    expected_board = normalize_goal_blackboard(loop.get("goal_blackboard"))
+    expected_board.update(normalize_goal_updates(loop.get("goal_updates")))
+    if normalize_goal_blackboard(expected_board) != board:
+        raise ValueError("Persisted agent-loop board does not match canonical completion history")
+
+
 def reconcile_committed_agent_loop_progress(
     session_state: dict[str, Any],
     *,
@@ -211,12 +233,13 @@ def reconcile_committed_agent_loop_progress(
     ):
         raise ValueError("Invalid or cross-scope canonical agent-loop completion history")
     progress = session_state.get("agent_loop_progress")
+    working_state = {"agent_loop_progress": deepcopy(progress)} if progress is not None else {}
     if progress is None:
         board: dict[str, str] = {}
         start_index = 0
     else:
         board = read_agent_loop_goal_blackboard(
-            session_state,
+            working_state,
             tenant_id=tenant_id,
             session_id=session_id,
         )
@@ -230,18 +253,7 @@ def reconcile_committed_agent_loop_progress(
         )
         if marker_index is None:
             raise ValueError("Persisted agent-loop commit is missing from canonical completion history")
-        last_committed = progress["last_committed"]
-        marker = completed_entries[marker_index]
-        marker_metadata = marker.get("metadata")
-        marker_loop = marker_metadata.get("agent_loop") if type(marker_metadata) is dict else None
-        if (
-            marker.get("trace_id") != last_committed["trace_id"]
-            or marker.get("job_id") != last_committed["job_id"]
-            or type(marker_loop) is not dict
-            or marker_loop.get("loop_run_id") != last_committed["loop_run_id"]
-            or marker_loop.get("turn_index") != last_committed["turn_index"]
-        ):
-            raise ValueError("Persisted agent-loop identity does not match canonical completion history")
+        _verify_progress_marker(completed_entries[marker_index], progress["last_committed"], board)
         start_index = marker_index + 1
 
     pending = completed_entries[start_index:]
@@ -252,16 +264,18 @@ def reconcile_committed_agent_loop_progress(
         ):
             raise ValueError("Invalid canonical agent-loop completion identity")
         metadata = entry.get("metadata")
-        loop = metadata.get("agent_loop") if type(metadata) is dict else None
-        if type(loop) is not dict:
+        if not isinstance(metadata, dict):
             raise ValueError("Canonical agent-loop completion metadata is malformed")
+        loop = metadata.get("agent_loop")
+        if type(loop) is not dict or "schema_version" not in loop:
+            raise ValueError("Canonical agent-loop completion has no versioned progress metadata")
         snapshot = normalize_goal_blackboard(loop.get("goal_blackboard"))
         if snapshot != board:
             raise ValueError("Cannot safely reconcile agent-loop progress from a stale goal snapshot")
-        committed_metadata = dict(metadata)
+        committed_metadata: dict[str, Any] = dict(metadata)
         committed_metadata["request_id"] = entry["request_id"]
         apply_committed_agent_loop_progress(
-            session_state,
+            working_state,
             metadata=committed_metadata,
             identity=AgentLoopCommitIdentity(
                 tenant_id=tenant_id,
@@ -270,7 +284,9 @@ def reconcile_committed_agent_loop_progress(
                 job_id=entry["job_id"],
             ),
         )
-        board = read_agent_loop_goal_blackboard(session_state)
+        board = read_agent_loop_goal_blackboard(working_state)
+    if pending:
+        session_state["agent_loop_progress"] = working_state["agent_loop_progress"]
     return bool(pending)
 
 
@@ -300,7 +316,11 @@ def apply_committed_agent_loop_progress(
         raise ValueError("Invalid committed agent-loop identity")
     updates = normalize_goal_updates(loop.get("goal_updates"))
     prior = session_state.get("agent_loop_progress")
-    board = read_agent_loop_goal_blackboard({"agent_loop_progress": prior}) if prior is not None else {}
+    board = read_agent_loop_goal_blackboard(
+        {"agent_loop_progress": prior},
+        tenant_id=identity.tenant_id,
+        session_id=identity.session_id,
+    ) if prior is not None else {}
     board.update(updates)
     if len(board) > _MAX_GOALS:
         raise ValueError("Agent-loop goal blackboard cannot contain more than 64 entries")

@@ -111,11 +111,6 @@ def test_recall_uses_committed_insights_and_index_while_memory_changes_are_stage
     committed = bot._execution_ledger.replay_tenant_memory(bot.config.tenant_id)
     bot.sync_semantic_memory_index(committed.state["memories"])
     observed = []
-    monkeypatch.setattr(
-        bot.memory_query, "relevant_memories_for_input",
-        lambda _query, limit=3, record_access=True: committed.state["memories"][:limit],
-    )
-
     def detect(_memories, insights):
         observed.extend(insights)
         return []

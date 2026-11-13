@@ -276,3 +276,41 @@ class TestBuildPrunedObservationHook:
 
         assert "[general] remembered" in result
         assert ctx["memory_signals"] == signals
+
+    def test_whole_evidence_and_signals_are_pruned_to_the_rendered_budget(self) -> None:
+        first = 'Fact one\nEvidence: {"source_id":"one","provenance":{"trace_id":"trace-one"}}'
+        oversized = 'Fact two\nEvidence: {"source_id":"two","provenance":{"evidence":"' + "x" * 2000 + '"}}'
+        hook = build_pruned_observation_hook(
+            ContextWindowPruner(max_chars=700),
+            snippet_provider=lambda _query: MemoryRecall(
+                [first, oversized],
+                {
+                    "evidence": [{"source_id": "one"}, {"source_id": "two"}],
+                    "temporal": [{"summary": "Fact one"}, {"summary": "Fact two"}],
+                    "conflicts": [],
+                    "retrieval": {"status": "degraded", "reason": "stale_index"},
+                },
+            ),
+            strict_snippets=True,
+        )
+        context = {"initial_observation": "Find the fact", "records": _make_records(3)}
+        rendered = hook(context)
+        assert len(rendered) <= 700
+        assert first in rendered and "Fact two" not in rendered
+        assert "stale_index" in rendered and "1 evidence entries dropped" in rendered
+        assert context["memory_signals"]["evidence"] == [{"source_id": "one"}]
+        assert context["memory_signals"]["temporal"] == [{"summary": "Fact one"}]
+
+    def test_oversized_pinned_task_fails_instead_of_truncating_identity(self) -> None:
+        hook = build_pruned_observation_hook(ContextWindowPruner(max_chars=256), core_identity="Pinned identity")
+        with pytest.raises(ValueError, match="identity and current task"):
+            hook({"initial_observation": "x" * 300})
+
+    def test_recall_keeps_the_initial_goal_after_a_generic_reply(self) -> None:
+        queries = []
+        hook = build_pruned_observation_hook(
+            ContextWindowPruner(), snippet_provider=lambda query: queries.append(query) or [],
+        )
+        rendered = hook({"initial_observation": "Recall the project owner", "last_reply": "Step completed."})
+        assert queries == ["Recall the project owner"]
+        assert "Step completed." in rendered

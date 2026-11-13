@@ -154,3 +154,53 @@ _PARAPHRASE_TOPICS = (
 def memory_paraphrase_cases() -> tuple[MemoryBenchmarkCase, ...]:
     facts = {fact.topic: fact for fact in MEMORY_BENCHMARK_FACTS}
     return tuple(MemoryBenchmarkCase(question, facts[topic].summary) for question, topic in _PARAPHRASE_TOPICS)
+
+
+OBSERVATION_DATASET_VERSION = "memory-observation.v1"
+OBSERVATION_CORPUS_DATE = "2026-11-12"
+OBSERVATION_CORPUS_SHA256 = "4233c90f57b6cbc6437bdb655f124ab8603837e2e12563d2c5e3fd8d7f5094ac"
+OBSERVATION_CONSOLIDATED_FACTS = (
+    "Morgan is saving money for an emergency fund.",
+    "Morgan plans to build a cedar bookcase with the woodworking club.",
+    "Morgan prefers concise written project updates across sessions.",
+)
+OBSERVATION_ARCHIVE_FACT = "The observatory workshop covered telescope calibration."
+OBSERVATION_SUPERSEDED_FACT = "Morgan prefers lengthy spoken project updates across sessions."
+
+
+@dataclass(frozen=True)
+class ObservationBenchmarkCase:
+    question: str
+    relevant_summaries: tuple[str, ...]
+    group: str
+
+
+def observation_benchmark_cases() -> tuple[ObservationBenchmarkCase, ...]:
+    exact = tuple(
+        ObservationBenchmarkCase(case.question, (case.expected_summary,), "exact")
+        for case in memory_benchmark_cases()
+    )
+    paraphrases = tuple(
+        ObservationBenchmarkCase(case.question, (case.expected_summary,), "paraphrase")
+        for case in memory_paraphrase_cases()
+    )
+    additional = (
+        ObservationBenchmarkCase(
+            "What is Morgan saving money for?", (OBSERVATION_CONSOLIDATED_FACTS[0],), "graph",
+        ),
+        ObservationBenchmarkCase(
+            "What does the woodworking club plan to build?", (OBSERVATION_CONSOLIDATED_FACTS[1],), "graph",
+        ),
+        ObservationBenchmarkCase(
+            "Recall Morgan's project update preferences.", (OBSERVATION_CONSOLIDATED_FACTS[2],), "cross_session",
+        ),
+        ObservationBenchmarkCase(
+            "What project updates does Morgan prefer currently?", (OBSERVATION_CONSOLIDATED_FACTS[2],), "supersession",
+        ),
+        ObservationBenchmarkCase(
+            "What did the observatory workshop cover?", (OBSERVATION_ARCHIVE_FACT,), "archive",
+        ),
+        ObservationBenchmarkCase("Explain quasar redshift spectroscopy.", (), "irrelevant"),
+        ObservationBenchmarkCase("How do compiler register allocators work?", (), "irrelevant"),
+    )
+    return (*exact, *paraphrases, *additional)

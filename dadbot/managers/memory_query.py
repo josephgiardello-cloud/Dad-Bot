@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import heapq
+import re
 from datetime import date
 from time import perf_counter
 
@@ -363,8 +364,17 @@ class MemoryQueryManager:
     def relevant_memories_for_input(
         self, user_input, limit=5, graph_result=None, *, from_date=None, to_date=None, record_access=True,
     ):
+        memories, diagnostics = self._retrieve_memories(
+            user_input, limit, graph_result, date_bounds=(from_date, to_date), record_access=record_access,
+        )
+        self.bot._last_memory_retrieval_diagnostics = diagnostics
+        return memories
+
+    def _retrieve_memories(
+        self, user_input, limit=5, graph_result=None, *, date_bounds=(None, None), record_access=True,
+    ):
         bounds = []
-        for name, value in (("from_date", from_date), ("to_date", to_date)):
+        for name, value in zip(("from_date", "to_date"), date_bounds, strict=True):
             if value is None:
                 bounds.append(None)
                 continue
@@ -386,7 +396,16 @@ class MemoryQueryManager:
         if requested_limit >= 3:
             effective_limit = max(3, effective_limit)
         stage_start = perf_counter()
-        catalog = self.bot.memory_catalog()
+        storage = self.bot.memory_manager._storage
+        authority_revision = None
+        if not record_access and storage._local_authority_backend() is not None:
+            snapshot = storage._committed_tenant_snapshot()
+            if snapshot is None:
+                raise RuntimeError("Memory observation requires committed tenant authority")
+            authority_revision, projection = snapshot
+            catalog = projection["memories"]
+        else:
+            catalog = self.bot.memory_catalog()
         memories = catalog
         if start_date is not None or end_date is not None:
             memories = []
@@ -400,15 +419,16 @@ class MemoryQueryManager:
         stage_seconds["catalog"] = perf_counter() - stage_start
         if not memories:
             self._lexical_index.scores([], set())
-            self.bot._last_memory_retrieval_diagnostics = {
+            diagnostics = {
                 "retrieved_count": 0,
                 "top_score_gap": 0.0,
                 "has_high_confidence": False,
                 "catalog_count": len(catalog),
                 "eligible_count": 0,
+                "authority_revision": authority_revision,
                 "total_seconds": round(perf_counter() - started, 6),
             }
-            return []
+            return [], diagnostics
 
         stage_start = perf_counter()
         graph_result = (
@@ -542,7 +562,7 @@ class MemoryQueryManager:
         if record_access:
             self._record_memory_access_signals(selected, catalog)
         stage_seconds["access_update"] = perf_counter() - stage_start
-        self.bot._last_memory_retrieval_diagnostics = {
+        diagnostics = {
             "retrieved_count": len(selected),
             "top_score_gap": round(max(0.0, top_score - second_score), 4),
             "has_high_confidence": bool(top_score >= 0.7),
@@ -553,11 +573,13 @@ class MemoryQueryManager:
             "lexical_candidate_count": len(lexical_scores),
             "graph_candidate_count": len(graph_candidate_keys),
             "semantic_status": semantic_status,
+            "authority_revision": authority_revision,
+            "selected_scores": [float(score) for score, _memory in selected],
             "stage_seconds": {key: round(value, 6) for key, value in stage_seconds.items()},
             "total_seconds": round(perf_counter() - started, 6),
             **reranker_diagnostics,
         }
-        return [memory for _score, memory in selected]
+        return [memory for _score, memory in selected], diagnostics
 
     def get_retrieval_diagnostics(self) -> dict:
         """Return a copy of the diagnostics from the most recent retrieval call.
@@ -591,7 +613,17 @@ class MemoryQueryManager:
             return "semantic_heavy"
         return "hybrid"
 
-    def retrieve_context(self, user_input, strategy="hybrid", limit=4):
+    @staticmethod
+    def _observation_query(user_input):
+        # In functional questions, the subject is evidence; "work" is not an employment topic.
+        subject = re.fullmatch(
+            r"how\s+(?:do|does)\s+(.+?)\s+(?:work|function)[?.!]?",
+            str(user_input or "").strip(), re.IGNORECASE,
+        )
+        return subject[1] if subject else user_input
+
+    def retrieve_context(self, user_input, strategy="hybrid", limit=4, *, record_access=True):
+        user_input = user_input if record_access else self._observation_query(user_input)
         requested = str(strategy or "hybrid").strip().lower() or "hybrid"
         effective_strategy = self.retrieval_strategy_for_input(user_input) if requested == "auto" else requested
         try:
@@ -617,16 +649,22 @@ class MemoryQueryManager:
         graph_result = self.bot.graph_retrieval_for_input(user_input, limit=graph_limit)
         archive_entries = (
             []
-            if graph_result
+            if graph_result or not record_access
             else self.relevant_archive_entries_for_input(
                 user_input,
                 limit=archive_limit,
             )
         )
+        if not record_access:
+            semantic_result = self._retrieve_memories(
+                user_input, limit=semantic_limit, graph_result=graph_result or {}, record_access=False,
+            )
+            self.bot._last_memory_retrieval_diagnostics = semantic_result[1]
+            return self._read_only_context(
+                user_input, effective_strategy, effective_limit, semantic_result, graph_result,
+            )
         semantic_memories = self.relevant_memories_for_input(
-            user_input,
-            limit=semantic_limit,
-            graph_result=graph_result or {},
+            user_input, limit=semantic_limit, graph_result=graph_result or {},
         )
         consolidated_memories = self.bot.select_active_consolidated_memories(
             user_input,
@@ -697,6 +735,71 @@ class MemoryQueryManager:
             "graph_result": graph_result,
             "archive_entries": archive_entries,
             "bundle": ranked_bundle[: max(3, effective_limit + 1)],
+        }
+
+    def _read_only_context(self, user_input, strategy, limit, semantic_result, graph_result):
+        semantic_memories, diagnostics = semantic_result
+        revision = diagnostics.get("authority_revision")
+        storage = self.bot.memory_manager._storage
+        consolidated_memories = None
+        if revision is not None:
+            snapshot = storage._committed_tenant_snapshot()
+            if snapshot is None or revision != snapshot[0]:
+                raise RuntimeError("Memory observation authority revision changed during retrieval")
+            consolidated_memories = [
+                memory for memory in snapshot[1]["consolidated_memories"] if not memory.get("superseded")
+            ]
+        graph_revision = (graph_result or {}).get("authority_revision")
+        if graph_revision is not None and graph_revision != revision:
+            raise RuntimeError("Memory observation graph and catalog authority revisions differ")
+        bundle = [
+            {
+                "type": "semantic",
+                "source_id": self.bot.memory_manager.graph_manager.graph_source_id("semantic", memory),
+                "score": score,
+                "payload": memory,
+            }
+            for memory, score in zip(semantic_memories, diagnostics.get("selected_scores", []), strict=True)
+        ]
+        query_tokens = {
+            token.removesuffix("'s") for token in self.lexical_query_tokens(str(user_input or ""))
+        }
+        for evidence in (graph_result or {}).get("supporting_evidence", []):
+            source_text = f"{evidence['summary']} {' '.join(evidence.get('matched_nodes', []))}"
+            if not query_tokens.intersection(self.lexical_query_tokens(source_text)):
+                continue
+            score = float(evidence["score"])
+            bundle.append({
+                "type": "graph", "source_id": evidence["source_id"],
+                "score": score / (1 + score), "payload": evidence,
+            })
+        ranked = sorted(bundle, key=lambda item: item["score"], reverse=True) if str(user_input or "").strip() else []
+        selected = []
+        seen = set()
+        for item in ranked:
+            key = self.bot.normalize_memory_text(item["payload"]["summary"])
+            if key in seen:
+                continue
+            seen.add(key)
+            selected.append(item)
+            if len(selected) >= limit:
+                break
+        semantic_status = diagnostics.get("semantic_status", {})
+        return {
+            "strategy": strategy, "semantic_memories": semantic_memories,
+            "consolidated_memories": consolidated_memories if consolidated_memories is not None else [
+                item["payload"] for item in selected if item["payload"].get("source_type") == "consolidated_memory"
+            ],
+            "graph_result": graph_result,
+            "archive_entries": [
+                item["payload"] for item in selected if item["payload"].get("source_type") == "archive_session"
+            ],
+            "bundle": selected,
+            "retrieval_status": {
+                "status": "degraded" if semantic_status.get("degraded") else ("ok" if selected else "empty"),
+                "reason": semantic_status.get("reason", ""),
+                "authority_revision": revision,
+            },
         }
 
     @staticmethod

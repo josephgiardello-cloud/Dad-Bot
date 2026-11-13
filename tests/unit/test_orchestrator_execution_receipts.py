@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from copy import deepcopy
 from types import SimpleNamespace
 from unittest.mock import Mock
 
@@ -95,3 +96,39 @@ def test_malformed_verified_receipts_fail_before_completion_metadata_is_persiste
 
     with pytest.raises(RuntimeError, match="receipt evidence is malformed"):
         _finalize(context, job)
+
+
+@pytest.mark.parametrize("damage", ["signature", "trace", "stage", "sequence", "key", "extra", "nan"])
+def test_resume_reverifies_receipts_instead_of_trusting_verified_label(damage):
+    from dadbot.core.agent_loop_recovery import verify_completion_receipts
+    from dadbot.core.execution_receipt import ReceiptSigner
+
+    signer = ReceiptSigner(b"test-receipt-key-for-recovery-00001")
+    receipt = signer.sign(
+        turn_id="trace", stage="save", sequence=1, stage_call_id="call",
+        checkpoint_hash="a" * 64, prev_receipt_sig="",
+    ).to_dict()
+    envelope = {
+        "schema_version": 1, "trace_id": "trace", "key_id": signer.key_id,
+        "stages": ["save"], "receipts": [receipt],
+    }
+    completion = {"trace_id": "trace", "metadata": {
+        "execution_receipt_status": "verified", "execution_receipt_evidence": envelope,
+    }}
+    verify_completion_receipts(deepcopy(completion), signer)
+    if damage == "signature":
+        receipt["signature"] = "0" * 64
+    elif damage == "trace":
+        receipt["turn_id"] = "foreign-trace"
+    elif damage == "stage":
+        envelope["stages"] = ["execute"]
+    elif damage == "sequence":
+        receipt["sequence"] = True
+    elif damage == "key":
+        envelope["key_id"] = "foreign-key"
+    elif damage == "extra":
+        receipt["raw_output"] = "not receipt evidence"
+    else:
+        receipt["completed_at"] = float("nan")
+    with pytest.raises(ValueError, match="receipt"):
+        verify_completion_receipts(completion, signer)
