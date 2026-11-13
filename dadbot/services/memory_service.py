@@ -48,6 +48,48 @@ class ExtractedMemoryFact(BaseModel):
 _EXTRACTED_MEMORY_FACTS = TypeAdapter(list[ExtractedMemoryFact])
 
 
+class MemoryConsolidationProposal(BaseModel):
+    model_config = ConfigDict(extra="forbid", strict=True)
+
+    summary: str = Field(min_length=1, max_length=500)
+    category: str = Field(min_length=1, max_length=40)
+    source_refs: list[str] = Field(min_length=1, max_length=18)
+
+    @field_validator("summary", "category")
+    @classmethod
+    def require_normalized_text(cls, value: str) -> str:
+        normalized = value.strip()
+        if not normalized or normalized != value:
+            raise ValueError("Field must contain normalized non-whitespace text")
+        return normalized
+
+    @field_validator("summary")
+    @classmethod
+    def limit_summary_words(cls, value: str) -> str:
+        if len(value.split()) > 22:
+            raise ValueError("Consolidated summary must not exceed 22 words")
+        return value
+
+    @field_validator("source_refs")
+    @classmethod
+    def require_unique_source_refs(cls, value: list[str]) -> list[str]:
+        if any(not item or item != item.strip() or len(item) > 128 for item in value):
+            raise ValueError("Source references must be normalized nonempty strings")
+        if len(set(value)) != len(value):
+            raise ValueError("Source references must be unique")
+        return value
+
+
+_MEMORY_CONSOLIDATION_PROPOSALS = TypeAdapter(list[MemoryConsolidationProposal])
+
+
+def validate_memory_consolidation_proposals(payload: Any) -> list[MemoryConsolidationProposal]:
+    proposals = _MEMORY_CONSOLIDATION_PROPOSALS.validate_python(payload, strict=True)
+    if len(proposals) > 6:
+        raise ValueError("Memory consolidation exceeded the six-proposal limit")
+    return proposals
+
+
 class SupportsMemoryFactExtraction(Protocol):
     def call_ollama_chat(
         self,

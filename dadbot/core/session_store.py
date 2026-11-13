@@ -112,11 +112,22 @@ class SessionStore:
     def pending_jobs(self) -> list[dict[str, Any]]:
         events = self.ledger.read() if self.ledger is not None else []
         latest_by_job: dict[str, dict[str, Any]] = {}
+        reconciled_requests: set[tuple[str, str, str]] = set()
         for event in events:
             tenant_id = str(event.get("tenant_id") or "").strip()
             if not tenant_id:
                 continue
             payload = dict(event.get("payload") or {})
+            if str(event.get("type") or "") in {"JOB_RECONCILED", "AGENT_LOOP_NO_EFFECT_CONFIRMED"}:
+                request_id = str(payload.get("request_id") or "").strip()
+                if request_id:
+                    reconciled_requests.add(
+                        (
+                            tenant_id,
+                            str(event.get("session_id") or "default").strip() or "default",
+                            request_id,
+                        ),
+                    )
             job_id = str(payload.get("job_id") or event.get("job_id") or "")
             if not job_id:
                 continue
@@ -127,13 +138,21 @@ class SessionStore:
             event_type = str(event.get("type") or "")
             payload = dict(event.get("payload") or {})
             if event_type in {"JOB_SUBMITTED", "JOB_QUEUED", "JOB_STARTED"}:
+                request_id = str(payload.get("request_id") or "")
+                identity = (
+                    str(event.get("tenant_id") or "").strip(),
+                    str(event.get("session_id") or "default").strip() or "default",
+                    request_id,
+                )
+                if request_id and identity in reconciled_requests:
+                    continue
                 pending.append(
                     {
                         "job_id": job_id,
                         "session_id": str(event.get("session_id") or "default"),
                         "tenant_id": str(event.get("tenant_id") or ""),
                         "status": event_type,
-                        "request_id": str(payload.get("request_id") or ""),
+                        "request_id": request_id,
                     },
                 )
         return pending

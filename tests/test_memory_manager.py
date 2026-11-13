@@ -330,6 +330,11 @@ def test_normalize_consolidated_memory_entry_limits_lists_and_recomputes_confide
             "category": "finance",
             "source_count": 3,
             "confidence": None,
+            "supporting_source_ids": [
+                "work-1:memory:0",
+                "work-1:memory:0",
+                " work-2:memory:1",
+            ],
             "supporting_summaries": [
                 "I've been saving money for emergencies",
                 "i have been saving money for emergencies",
@@ -349,6 +354,7 @@ def test_normalize_consolidated_memory_entry_limits_lists_and_recomputes_confide
     )
 
     assert entry["summary"] == "Tony has been saving money for emergencies."
+    assert entry["supporting_source_ids"] == ["work-1:memory:0"]
     assert entry["supporting_summaries"] == [
         "Tony has been saving money for emergencies.",
         "Tony wants to save more money.",
@@ -357,6 +363,27 @@ def test_normalize_consolidated_memory_entry_limits_lists_and_recomputes_confide
     ]
     assert entry["contradictions"] == ["Spent impulsively", "Ignored budget", "Missed savings", "Overspent again"]
     assert 0.05 <= entry["confidence"] <= 0.98
+
+
+def test_consolidated_memory_merge_retains_unique_source_ids(bot):
+    merged = bot.memory_coordinator._merge_consolidated_pair(
+        {
+            "summary": "Tony is saving consistently.",
+            "source_count": 1,
+            "supporting_source_ids": ["work-1:memory:0"],
+        },
+        {
+            "summary": "Tony is saving consistently.",
+            "source_count": 1,
+            "supporting_source_ids": ["work-2:memory:1"],
+        },
+    )
+
+    assert merged["supporting_source_ids"] == [
+        "work-1:memory:0",
+        "work-2:memory:1",
+    ]
+    assert merged["source_count"] == 2
 
 
 def test_memory_dedup_key_collapses_finance_and_work_stress_variants(bot):

@@ -89,6 +89,7 @@ class ConsolidatedMemory(DadBotModel):
     superseded_reason: str = ""
     superseded_at: date | datetime | None = None
     last_reinforced_at: date | datetime | None = None
+    supporting_source_ids: list[str] = Field(default_factory=list, max_length=24)
     supporting_summaries: list[str] = Field(default_factory=list)
     contradictions: list[str] = Field(default_factory=list)
     reviewed_conflicts: list[str] = Field(default_factory=list)

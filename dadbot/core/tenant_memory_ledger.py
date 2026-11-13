@@ -8,7 +8,6 @@ from copy import deepcopy
 from dataclasses import dataclass
 from typing import Any
 
-
 TENANT_MEMORY_EVENT = "TENANT_MEMORY_COMMITTED"
 
 
@@ -117,6 +116,33 @@ def replay_tenant_memory(events: list[dict[str, Any]], tenant_id: str) -> Tenant
     if not isinstance(tenant_id, str) or not tenant_id.strip() or tenant_id != tenant_id.strip():
         raise ValueError("Tenant ID must be a nonempty normalized string")
     return replay_all_tenant_memory(events).get(tenant_id, TenantMemoryRevision(0, None, {}))
+
+
+def replay_tenant_memory_at_revision(
+    events: list[dict[str, Any]],
+    tenant_id: str,
+    revision: int,
+) -> TenantMemoryRevision:
+    if type(revision) is not int or revision < 0:
+        raise ValueError("Tenant memory revision must be a nonnegative integer")
+    current = replay_tenant_memory(events, tenant_id)
+    if revision > current.revision:
+        raise ValueError("Requested tenant memory revision is not committed")
+    if revision == 0:
+        return TenantMemoryRevision(0, None, {})
+
+    operations: dict[str, dict[str, Any]] = {}
+    state: dict[str, Any] | None = None
+    for operation_id, operation in current.operations.items():
+        event = operation["event"]
+        event_revision = event["payload"]["revision"]
+        if event_revision > revision:
+            break
+        operations[operation_id] = operation
+        state = operation["state"]
+    if state is None or len(operations) != revision:
+        raise TenantMemoryLedgerCorruption("Requested tenant memory revision is missing")
+    return TenantMemoryRevision(revision, deepcopy(state), deepcopy(operations))
 
 
 def same_tenant_memory(left: dict[str, Any], right: dict[str, Any]) -> bool:

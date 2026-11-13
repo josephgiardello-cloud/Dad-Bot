@@ -8,6 +8,11 @@ from copy import deepcopy
 from dataclasses import asdict, dataclass
 from typing import Any
 
+from dadbot.core.agent_loop_outcome import (
+    AgentLoopOutcomeVerifier,
+    build_agent_loop_outcome_evidence,
+    verify_agent_loop_outcome,
+)
 from dadbot.core.durability import FileLockMutex
 from dadbot.core.execution_receipt import ExecutionReceipt, ReceiptChain, ReceiptSigner
 from dadbot.core.ledger_backend import FileWALLedgerBackend
@@ -17,9 +22,8 @@ from dadbot_system.delegation import require_tenant_authority_if_active
 
 
 def validate_agent_loop_policy(policy: Any) -> None:
-    if type(policy) is not dict or set(policy) != {
-        "max_turns", "max_failures", "max_consecutive_noop", "allowed_tools", "trigger_type",
-    }:
+    required = {"max_turns", "max_failures", "max_consecutive_noop", "allowed_tools", "trigger_type"}
+    if type(policy) is not dict or set(policy) not in (required, required | {"outcome_verifier_id"}):
         raise ValueError("Invalid canonical loop cursor policy")
     for name, minimum in (("max_turns", 1), ("max_failures", 0), ("max_consecutive_noop", 1)):
         if type(policy[name]) is not int or policy[name] < minimum:
@@ -32,6 +36,19 @@ def validate_agent_loop_policy(policy: Any) -> None:
         or type(policy["trigger_type"]) is not str or not policy["trigger_type"].strip()
     ):
         raise ValueError("Invalid canonical loop cursor policy tools or trigger")
+    verifier_id = policy.get("outcome_verifier_id", "")
+    if (
+        type(verifier_id) is not str
+        or (verifier_id and re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9._:/-]{0,127}", verifier_id) is None)
+    ):
+        raise ValueError("Invalid canonical loop outcome verifier ID")
+
+
+def _normalize_agent_loop_policy(policy: Any) -> dict[str, Any]:
+    validate_agent_loop_policy(policy)
+    normalized = deepcopy(policy)
+    normalized.setdefault("outcome_verifier_id", "")
+    return normalized
 
 
 def project_agent_loop_session(control_plane: Any, *, tenant_id: str, session_id: str) -> dict[str, Any]:
@@ -78,14 +95,15 @@ class AgentLoopCursor:
         ):
             raise ValueError("Invalid canonical agent-loop cursor")
         cursor = cls(**deepcopy(value))
-        validate_agent_loop_policy(cursor.policy)
+        cursor.policy = _normalize_agent_loop_policy(cursor.policy)
+        expected_policy = _normalize_agent_loop_policy(policy)
         if (
             type(cursor.schema_version) is not int or cursor.schema_version != 1
             or cursor.tenant_id != tenant_id or cursor.session_id != session_id
             or (initial_input is not None and (
                 cursor.input_hash != hashlib.sha256(initial_input.encode("utf-8")).hexdigest()
             ))
-            or cursor.policy != policy
+            or cursor.policy != expected_policy
         ):
             raise ValueError("Canonical loop cursor scope, input, or policy mismatch")
         for name in (
@@ -109,13 +127,23 @@ class AgentLoopCursor:
             ))
             or cursor.stop_reason not in {
                 "", "kernel_should_end", "noop_threshold", "max_turns", "reflection_stop", "failure_budget",
+                "goal_satisfied", "outcome_unverified",
             }
         ):
             raise ValueError("Inconsistent canonical loop cursor")
         return cursor
 
 
-def recover_agent_loop_cursor(cursor: AgentLoopCursor, index: Any, signer: ReceiptSigner) -> str:
+def recover_agent_loop_cursor(
+    cursor: AgentLoopCursor,
+    index: Any,
+    signer: ReceiptSigner,
+    *,
+    outcome_verifier: AgentLoopOutcomeVerifier | None = None,
+) -> str:
+    verifier_id = cursor.policy.get("outcome_verifier_id", "")
+    if bool(verifier_id) != (outcome_verifier is not None):
+        raise ValueError("Canonical loop outcome verifier does not match its persisted policy")
     request_id = cursor.pending_request_id or cursor.last_request_id
     if not request_id:
         return ""
@@ -123,11 +151,13 @@ def recover_agent_loop_cursor(cursor: AgentLoopCursor, index: Any, signer: Recei
         session_id=cursor.session_id, request_id=request_id, tenant_id=cursor.tenant_id,
     )
     if completion is None:
-        raise RuntimeError("Interrupted agent-loop dispatch is uncertain; automatic resend is forbidden")
+        _recover_missing_completion(cursor, index, request_id)
+        return ""
     verify_completion_receipts(completion, signer)
     loop = completion["metadata"].get("agent_loop")
     if (
         type(loop) is not dict or loop.get("loop_run_id") != cursor.loop_run_id
+        or loop.get("outcome_verifier_id", "") != verifier_id
         or type(loop.get("turn_index")) is not int
         or (cursor.pending_request_id and loop["turn_index"] != cursor.next_turn)
         or (not cursor.pending_request_id and loop["turn_index"] >= cursor.next_turn)
@@ -142,6 +172,12 @@ def recover_agent_loop_cursor(cursor: AgentLoopCursor, index: Any, signer: Recei
     ):
         raise ValueError("Canonical loop completion has no valid recorded result")
     initial_reply, should_end = outcome
+    outcome_status = _recheck_recovered_outcome(
+        cursor,
+        completion,
+        should_end,
+        outcome_verifier,
+    )
     if cursor.pending_request_id:
         cursor.last_request_id = cursor.pending_request_id
         cursor.pending_request_id = ""
@@ -155,7 +191,74 @@ def recover_agent_loop_cursor(cursor: AgentLoopCursor, index: Any, signer: Recei
             cursor.stop_reason = "noop_threshold"
         elif cursor.next_turn > cursor.policy["max_turns"]:
             cursor.stop_reason = "max_turns"
+    _apply_recovered_outcome_status(cursor, outcome_status)
     return initial_reply
+
+
+def _recover_missing_completion(cursor: AgentLoopCursor, index: Any, request_id: str) -> None:
+    if cursor.pending_request_id and index.has_operator_confirmed_no_effect(
+        session_id=cursor.session_id,
+        request_id=request_id,
+        loop_run_id=cursor.loop_run_id,
+        turn_index=cursor.next_turn,
+        tenant_id=cursor.tenant_id,
+    ):
+        _record_interrupted_failure(
+            cursor,
+            "An authorized operator confirmed that the external effect did not happen and execution is quiesced; "
+            "the prior request was not replayed. Continue only within the configured failure and turn budgets.",
+        )
+        return
+    if cursor.pending_request_id and _recover_unsubmitted_request(cursor, index, request_id):
+        return
+    raise RuntimeError("Interrupted agent-loop dispatch is uncertain; automatic resend is forbidden")
+
+
+def _recover_unsubmitted_request(cursor: AgentLoopCursor, index: Any, request_id: str) -> bool:
+    if index.has_request_dispatch_evidence(
+        session_id=cursor.session_id,
+        request_id=request_id,
+        tenant_id=cursor.tenant_id,
+    ):
+        return False
+    _record_interrupted_failure(
+        cursor,
+        "The previous turn has no canonical submission or effect evidence; "
+        "it was not automatically replayed. Continue only within the configured failure and turn budgets.",
+    )
+    return True
+
+
+def _record_interrupted_failure(cursor: AgentLoopCursor, system_observation: str) -> None:
+    cursor.pending_request_id = ""
+    cursor.failures += 1
+    cursor.next_turn += 1
+    cursor.system_observation = system_observation
+    if cursor.failures > cursor.policy["max_failures"]:
+        cursor.stop_reason = "failure_budget"
+    elif cursor.next_turn > cursor.policy["max_turns"]:
+        cursor.stop_reason = "max_turns"
+
+
+def _recheck_recovered_outcome(
+    cursor: AgentLoopCursor,
+    completion: dict[str, Any],
+    should_end: bool,
+    outcome_verifier: AgentLoopOutcomeVerifier | None,
+) -> str | None:
+    if outcome_verifier is None or cursor.stop_reason == "goal_satisfied":
+        return None
+    evidence = build_agent_loop_outcome_evidence(completion, should_end=should_end)
+    return verify_agent_loop_outcome(outcome_verifier, evidence)
+
+
+def _apply_recovered_outcome_status(cursor: AgentLoopCursor, status: str | None) -> None:
+    if status == "satisfied":
+        cursor.stop_reason = "goal_satisfied"
+    elif status == "unknown":
+        cursor.stop_reason = "outcome_unverified"
+    elif status == "not_satisfied" and cursor.stop_reason in {"kernel_should_end", "outcome_unverified"}:
+        cursor.stop_reason = ""
 
 
 def verify_completion_receipts(completion: dict[str, Any], signer: ReceiptSigner) -> None:
@@ -169,7 +272,9 @@ def verify_completion_receipts(completion: dict[str, Any], signer: ReceiptSigner
         or set(evidence) != {"schema_version", "trace_id", "key_id", "stages", "receipts"}
         or type(evidence["schema_version"]) is not int or evidence["schema_version"] != 1
         or evidence["trace_id"] != completion.get("trace_id")
-        or evidence["key_id"] != signer.key_id
+        or type(evidence["key_id"]) is not str
+        or re.fullmatch("[0-9a-f]{16}", evidence["key_id"]) is None
+        or not signer.can_verify_key_id(evidence["key_id"])
         or type(evidence["stages"]) is not list or not 1 <= len(evidence["stages"]) <= 64
         or any(type(stage) is not str or not stage or len(stage) > 120 for stage in evidence["stages"])
         or type(evidence["receipts"]) is not list
@@ -195,7 +300,10 @@ def verify_completion_receipts(completion: dict[str, Any], signer: ReceiptSigner
     if (
         [receipt.stage for receipt in receipts] != evidence["stages"]
         or chain.verify_continuity(
-            signer, expected_stages=evidence["stages"], expected_turn_id=completion["trace_id"],
+            signer,
+            expected_stages=evidence["stages"],
+            expected_turn_id=completion["trace_id"],
+            key_id=evidence["key_id"],
         )
     ):
         raise ValueError("Canonical loop execution receipt verification failed")

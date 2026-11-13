@@ -336,6 +336,18 @@ class MemoryNormalizer:
                 break
         return supporting_summaries
 
+    @staticmethod
+    def _normalize_consolidated_supporting_source_ids(entry: dict) -> list[str]:
+        source_ids: list[str] = []
+        for item in entry.get("supporting_source_ids", []):
+            if not isinstance(item, str) or not item or len(item) > 128 or item != item.strip():
+                continue
+            if item not in source_ids:
+                source_ids.append(item)
+            if len(source_ids) >= 24:
+                break
+        return source_ids
+
     def _normalize_consolidated_contradictions(self, entry: dict) -> list[str]:
         contradictions: list[str] = []
         contradiction_limit = self.bot.runtime_config.window("contradictions", 4)
@@ -373,6 +385,7 @@ class MemoryNormalizer:
         superseded_at: str | None,
         last_reinforced_at: str | None,
     ) -> dict:
+        supporting_source_ids = self._normalize_consolidated_supporting_source_ids(entry)
         return {
             "summary": summary,
             "category": str(
@@ -395,6 +408,7 @@ class MemoryNormalizer:
             "superseded_reason": str(entry.get("superseded_reason") or "").strip(),
             "superseded_at": superseded_at,
             "last_reinforced_at": last_reinforced_at,
+            "supporting_source_ids": supporting_source_ids,
             "supporting_summaries": supporting_summaries,
             "contradictions": contradictions,
             "reviewed_conflicts": [
@@ -418,6 +432,7 @@ class MemoryNormalizer:
             "superseded_reason": str(dumped.get("superseded_reason") or ""),
             "superseded_at": dumped.get("superseded_at"),
             "last_reinforced_at": dumped.get("last_reinforced_at"),
+            "supporting_source_ids": dumped["supporting_source_ids"],
             "supporting_summaries": dumped["supporting_summaries"],
             "contradictions": dumped["contradictions"],
             **({"reviewed_conflicts": dumped["reviewed_conflicts"]} if dumped["reviewed_conflicts"] else {}),

@@ -8,11 +8,26 @@ from __future__ import annotations
 
 import hashlib
 import os
+from dataclasses import dataclass
 from typing import Any
 
 from dadbot.core.ledger_writer import LedgerWriter
 from dadbot.core.session_store import SessionStore
 from dadbot.core.tenant_session import current_tenant_id, resolve_tenant_id, tenant_session_scope
+
+
+@dataclass(frozen=True, slots=True)
+class AgentLoopNoEffectAttestation:
+    """Authorized statement that a pending loop request had no effect and is quiesced."""
+
+    session_id: str
+    tenant_id: str
+    request_id: str
+    loop_run_id: str
+    turn_index: int
+    confirmed_no_external_effect: bool
+    execution_quiesced: bool
+    reason: str = "operator_confirmed_no_external_effect"
 
 
 class ReconciliationMixin:
@@ -148,11 +163,7 @@ class ReconciliationMixin:
         tenant_id: str,
         sid: str,
         trace_token: str,
-        rid: str,
-        eid: str,
-        reason: str,
-        request_resolution: str,
-        normalized_mode: str,
+        payload: dict[str, Any],
     ) -> None:
         writer.write_event(
             event_type="JOB_RECONCILED",
@@ -160,13 +171,7 @@ class ReconciliationMixin:
             tenant_id=tenant_id,
             trace_id=trace_token,
             kernel_step_id="control_plane.reconcile.apply",
-            payload={
-                "request_id": rid,
-                "effect_id": eid,
-                "reason": str(reason or "operator_reconcile"),
-                "resolution": request_resolution,
-                "mode": normalized_mode,
-            },
+            payload=payload,
             committed=True,
         )
 
@@ -177,11 +182,7 @@ class ReconciliationMixin:
         tenant_id: str,
         sid: str,
         trace_token: str,
-        rid: str,
-        eid: str,
-        reason: str,
-        effect_resolution: str,
-        normalized_mode: str,
+        payload: dict[str, Any],
     ) -> None:
         writer.write_event(
             event_type="EFFECT_RECONCILED",
@@ -189,13 +190,7 @@ class ReconciliationMixin:
             tenant_id=tenant_id,
             trace_id=trace_token,
             kernel_step_id="control_plane.reconcile.apply",
-            payload={
-                "effect_id": eid,
-                "request_id": rid,
-                "reason": str(reason or "operator_reconcile"),
-                "resolution": effect_resolution,
-                "mode": normalized_mode,
-            },
+            payload=payload,
             committed=True,
         )
 
@@ -227,6 +222,76 @@ class ReconciliationMixin:
                 mode=mode,
             )
 
+    def attest_agent_loop_dispatch_not_applied(
+        self,
+        attestation: AgentLoopNoEffectAttestation,
+    ) -> dict[str, Any]:
+        """Record a tenant-admin attestation after loop recovery is quiesced."""
+        if not isinstance(attestation, AgentLoopNoEffectAttestation):
+            raise TypeError("attestation must be an AgentLoopNoEffectAttestation")
+        sid = str(attestation.session_id or "").strip()
+        if not sid:
+            raise ValueError("session_id is required")
+        tenant = resolve_tenant_id(attestation.tenant_id, default_tenant_id="default")
+        enforce = getattr(self, "_enforce_distributed_runtime_authority", None)
+        if callable(enforce):
+            enforce(operation="reconcile_apply")
+        from dadbot.core.agent_loop_recovery import agent_loop_recovery_lock
+
+        with agent_loop_recovery_lock(
+            self.ledger._backend,
+            tenant_id=tenant,
+            session_id=sid,
+        ):
+            with tenant_session_scope(tenant, sid, allow_tenant_switch=True):
+                payload = self._validate_loop_operator_attestation(
+                    tenant_id=tenant,
+                    session_id=sid,
+                    request_id=attestation.request_id,
+                    attestation=attestation,
+                )
+                if self._ledger_index.has_operator_confirmed_no_effect(
+                    session_id=sid,
+                    request_id=attestation.request_id,
+                    loop_run_id=attestation.loop_run_id,
+                    turn_index=attestation.turn_index,
+                    tenant_id=tenant,
+                ):
+                    return {
+                        "applied": False,
+                        "events": [],
+                        "tenant_id": tenant,
+                        "session_id": sid,
+                        "request_id": attestation.request_id,
+                        "effect_ids": list(payload["effect_ids"]),
+                        "reason": payload["reason"],
+                    }
+                writer = LedgerWriter(self.ledger)
+                writer.write_event(
+                    event_type="AGENT_LOOP_NO_EFFECT_CONFIRMED",
+                    session_id=sid,
+                    tenant_id=tenant,
+                    trace_id=self._reconciliation_trace_id(
+                        session_id=sid,
+                        request_id=attestation.request_id,
+                        effect_id="",
+                        tenant_id=tenant,
+                    ),
+                    kernel_step_id="control_plane.reconcile.operator_attestation",
+                    payload=payload,
+                    committed=True,
+                )
+                self._ledger_index.refresh(force=True)
+                return {
+                    "applied": True,
+                    "events": ["AGENT_LOOP_NO_EFFECT_CONFIRMED"],
+                    "tenant_id": tenant,
+                    "session_id": sid,
+                    "request_id": attestation.request_id,
+                    "effect_ids": list(payload["effect_ids"]),
+                    "reason": payload["reason"],
+                }
+
     def _apply_reconciliation_in_scope(
         self,
         *,
@@ -254,7 +319,6 @@ class ReconciliationMixin:
             request_resolution=request_resolution,
             effect_resolution=effect_resolution,
         )
-
         trace_token = self._reconciliation_trace_id(
             session_id=sid,
             request_id=rid,
@@ -263,18 +327,19 @@ class ReconciliationMixin:
         )
         writer = LedgerWriter(self.ledger)
         wrote_events: list[str] = []
-
         if rid and self._request_has_ambiguous_inflight_effect_state(session_id=sid, request_id=rid):
             self._write_job_reconciled_event(
                 writer=writer,
                 tenant_id=tenant_id,
                 sid=sid,
                 trace_token=trace_token,
-                rid=rid,
-                eid=eid,
-                reason=reason,
-                request_resolution=request_resolution,
-                normalized_mode=normalized_mode,
+                payload={
+                    "request_id": rid,
+                    "effect_id": eid,
+                    "reason": str(reason or "operator_reconcile"),
+                    "resolution": request_resolution,
+                    "mode": normalized_mode,
+                },
             )
             wrote_events.append("JOB_RECONCILED")
 
@@ -284,11 +349,13 @@ class ReconciliationMixin:
                 tenant_id=tenant_id,
                 sid=sid,
                 trace_token=trace_token,
-                rid=rid,
-                eid=eid,
-                reason=reason,
-                effect_resolution=effect_resolution,
-                normalized_mode=normalized_mode,
+                payload={
+                    "effect_id": eid,
+                    "request_id": rid,
+                    "reason": str(reason or "operator_reconcile"),
+                    "resolution": effect_resolution,
+                    "mode": normalized_mode,
+                },
             )
             wrote_events.append("EFFECT_RECONCILED")
 
@@ -302,6 +369,68 @@ class ReconciliationMixin:
             "effect_id": eid,
             "reason": str(reason or "operator_reconcile"),
             "mode": normalized_mode,
+        }
+
+    def _validate_loop_operator_attestation(
+        self,
+        *,
+        tenant_id: str,
+        session_id: str,
+        request_id: str,
+        attestation: AgentLoopNoEffectAttestation,
+    ) -> dict[str, Any]:
+        loop_run_id = str(attestation.loop_run_id or "").strip()
+        turn_index = attestation.turn_index
+        if (
+            attestation.confirmed_no_external_effect is not True
+            or attestation.execution_quiesced is not True
+            or str(attestation.request_id or "").strip() != request_id
+            or not loop_run_id
+            or type(turn_index) is not int
+            or turn_index < 1
+        ):
+            raise ValueError("Operator attestation must confirm no external effect and quiesced execution")
+
+        from dadbot_system.delegation import require_runtime_admin_authority
+
+        operator_ref = require_runtime_admin_authority(tenant_id)
+        state = SessionStore.projected_from_ledger(ledger=self.ledger).get(session_id, tenant_id=tenant_id)
+        cursor = dict((state or {}).get("agent_loop_cursor") or {})
+        if (
+            str(cursor.get("pending_request_id") or "") != request_id
+            or str(cursor.get("loop_run_id") or "") != loop_run_id
+            or cursor.get("next_turn") != turn_index
+        ):
+            raise ValueError("Operator attestation does not match the pending agent-loop request")
+        if self._ledger_index.completed_metadata(
+            session_id=session_id,
+            request_id=request_id,
+            tenant_id=tenant_id,
+        ) is not None:
+            raise ValueError("Completed requests cannot receive a no-effect attestation")
+        if not self._ledger_index.has_request_dispatch_evidence(
+            session_id=session_id,
+            request_id=request_id,
+            tenant_id=tenant_id,
+        ):
+            raise ValueError("No-effect attestation requires canonical dispatch evidence")
+        effect_ids = self._ledger_index.effect_ids_for_request(
+            session_id=session_id,
+            request_id=request_id,
+            tenant_id=tenant_id,
+        )
+        reason = str(attestation.reason or "").strip() or "operator_confirmed_no_external_effect"
+        if len(reason) > 512:
+            raise ValueError("Operator attestation reason exceeds the 512-character limit")
+        return {
+            "request_id": request_id,
+            "confirmed_no_external_effect": True,
+            "execution_quiesced": True,
+            "loop_run_id": loop_run_id,
+            "turn_index": turn_index,
+            "operator_ref": operator_ref,
+            "effect_ids": list(effect_ids),
+            "reason": reason,
         }
 
     def _pending_reconcile_required_entries(self) -> list[dict[str, str]]:

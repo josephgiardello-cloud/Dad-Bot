@@ -408,6 +408,7 @@ class TurnGraph:
             self._receipt_signer,
             expected_stages=expected_stages,
             expected_turn_id=str(turn_context.trace_id or ""),
+            key_id=self._receipt_signer.key_id,
         )
         if violations:
             raise RuntimeExecutionError("Execution receipt chain failed continuity verification")

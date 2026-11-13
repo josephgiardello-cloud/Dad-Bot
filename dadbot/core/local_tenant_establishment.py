@@ -14,6 +14,7 @@ from typing import Any, Callable
 from dadbot.core.durability import FileLockMutex
 from dadbot.core.execution_ledger import ExecutionLedger
 from dadbot.core.ledger_backend import FileWALLedgerBackend, WALCorruptionError, _validate_append_head
+from dadbot.core.memory_consolidation_outbox import build_memory_consolidation_work
 from dadbot.core.tenant_memory_ledger import (
     TenantMemoryOperationConflict,
     TenantMemoryRevision,
@@ -185,6 +186,9 @@ def commit_local_tenant(
     repair_snapshot: Callable[[dict[str, Any]], None],
     *,
     execution_ledger: ExecutionLedger | None = None,
+    session_id: str = "",
+    trace_id: str = "",
+    enqueue_consolidation: bool = False,
 ) -> int:
     """Commit a candidate and repair its snapshot while holding the WAL writer lock."""
     from dadbot_system.delegation import tenant_mutation_fence
@@ -197,6 +201,9 @@ def commit_local_tenant(
         return _commit_local_tenant_fenced(
             backend, tenant_id, expected_revision, operation_id, state, publish, repair_snapshot,
             execution_ledger=execution_ledger,
+            session_id=session_id,
+            trace_id=trace_id,
+            enqueue_consolidation=enqueue_consolidation,
         )
 
 
@@ -257,6 +264,9 @@ def _commit_local_tenant_fenced(
     repair_snapshot: Callable[[dict[str, Any]], None],
     *,
     execution_ledger: ExecutionLedger | None = None,
+    session_id: str = "",
+    trace_id: str = "",
+    enqueue_consolidation: bool = False,
 ) -> int:
     candidate = validate_tenant_memory_state(state)
     if not backend._fsync_enabled:
@@ -285,8 +295,8 @@ def _commit_local_tenant_fenced(
             )
         event = {
             "type": "TENANT_MEMORY_COMMITTED",
-            "session_id": "",
-            "trace_id": "",
+            "session_id": session_id,
+            "trace_id": trace_id,
             "kernel_step_id": "tenant-memory",
             "timestamp": datetime.now(timezone.utc).isoformat(),
             "committed": True,
@@ -298,6 +308,14 @@ def _commit_local_tenant_fenced(
                 "state": candidate,
             },
         }
+        if enqueue_consolidation:
+            event["payload"]["consolidation_work"] = build_memory_consolidation_work(
+                tenant_id=tenant_id,
+                session_id=session_id,
+                trace_id=trace_id,
+                source_revision=expected_revision + 1,
+                source_operation_id=operation_id,
+            )
         ledger._seal_payload_hash_chain(event, ledger.get_next_sequence())
         _validate_append_head(events, event, verified_prefix=events == ledger._events)
         if execution_ledger is not None:

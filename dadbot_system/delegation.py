@@ -147,6 +147,22 @@ def require_tenant_authority(tenant_id: str) -> None:
     verify_live_authority()
 
 
+def require_runtime_admin_authority(tenant_id: str) -> str:
+    runtime_authority = _runtime_authority.get()
+    if runtime_authority is None:
+        raise AuthorizationError("Authenticated administrator authority is required")
+    _store, principal, scope = runtime_authority
+    tenant = require_tenant_id(tenant_id)
+    if principal.tenant_id != tenant:
+        raise AuthorizationError("Runtime authority tenant mismatch")
+    if scope != "admin":
+        raise AuthorizationError("Authenticated administrator scope is required")
+    verify_live_authority()
+    return hashlib.sha256(
+        f"{principal.issuer}:{principal.subject}".encode(),
+    ).hexdigest()[:20]
+
+
 def require_tenant_authority_if_active(tenant_id: str, *, required: bool = False) -> None:
     if (
         required or _live_effect_authority_required.get()

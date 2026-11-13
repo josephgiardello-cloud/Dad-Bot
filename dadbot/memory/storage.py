@@ -26,6 +26,7 @@ from dadbot.core.execution_boundary import (
     enforce_memory_write_owner,
 )
 from dadbot.core.execution_context import (
+    active_execution_trace,
     ensure_execution_trace_root,
     get_active_core_state,
     push_core_state_event,
@@ -523,18 +524,35 @@ class MemoryStorageBackend:
                     raise TenantMemoryRevisionConflict("Graph projection is not based on the committed tenant revision")
                 yield
 
-    def _commit_local_projection(self, projection: dict, publish=None) -> None:
+    def _commit_local_projection(
+        self,
+        projection: dict,
+        publish=None,
+        *,
+        operation_id: str | None = None,
+    ) -> None:
         from dadbot_system.delegation import tenant_mutation_fence
 
         with tenant_mutation_fence(
             self.bot.config.tenant_id, required=self._authenticated_authority_required
         ):
-            self._commit_local_projection_fenced(projection, publish=publish)
+            self._commit_local_projection_fenced(
+                projection,
+                publish=publish,
+                operation_id=operation_id,
+            )
 
-    def _commit_local_projection_fenced(self, projection: dict, publish=None) -> None:
+    def _commit_local_projection_fenced(
+        self,
+        projection: dict,
+        publish=None,
+        *,
+        operation_id: str | None = None,
+    ) -> None:
         self._authorize_tenant_memory()
         from dadbot.core.local_tenant_establishment import commit_local_tenant
         from dadbot.core.tenant_memory_ledger import TenantMemoryRevisionConflict
+        from dadbot.core.tenant_session import current_tenant_session
 
         if self._tenant_recovery_required or self._tenant_base_revision is None:
             raise RuntimeError("Tenant memory requires restart and ledger recovery before writing")
@@ -546,6 +564,19 @@ class MemoryStorageBackend:
         backend = self._local_authority_backend()
         if backend is None:
             raise RuntimeError("Local tenant memory commits require file-WAL authority")
+        identity = current_tenant_session()
+        trace = active_execution_trace()
+        session_id = ""
+        trace_id = ""
+        if (
+            identity is not None
+            and identity.tenant_id == str(self.bot.config.tenant_id)
+            and trace is not None
+            and trace.trace_id
+            and not bool(trace.metadata.get("out_of_band"))
+        ):
+            session_id = identity.session_id
+            trace_id = trace.trace_id
         if semantic_changed or graph_changed:
             self._require_tenant_isolated_indexes()
         try:
@@ -556,11 +587,19 @@ class MemoryStorageBackend:
                     backend,
                     self.bot.config.tenant_id,
                     self._tenant_base_revision,
-                    uuid.uuid4().hex,
+                    str(operation_id or uuid.uuid4().hex),
                     projection,
                     publish or (lambda: None),
                     self._repair_established_snapshot,
                     execution_ledger=ledger,
+                    session_id=session_id,
+                    trace_id=trace_id,
+                    enqueue_consolidation=bool(
+                        session_id
+                        and trace_id
+                        and backend._security_mode != "AUTHENTICATED"
+                        and committed.state.get("memories") != projection.get("memories")
+                    ),
                 )
                 ledger.load_from_backend(only_if_changed=not ledger._backend_uncertain)
         except TenantMemoryRevisionConflict:
@@ -822,6 +861,51 @@ class MemoryStorageBackend:
         owner=None,
         **changes,
     ):
+        return self._mutate_memory_store(
+            None,
+            mutator=mutator,
+            normalize=normalize,
+            save=save,
+            owner=owner,
+            changes=changes,
+        )
+
+    def mutate_memory_store_idempotently(
+        self,
+        *,
+        operation_id: str,
+        mutator=None,
+        normalize=True,
+        save=True,
+        owner=None,
+        **changes,
+    ):
+        if (
+            not isinstance(operation_id, str)
+            or not operation_id
+            or operation_id != operation_id.strip()
+        ):
+            raise ValueError("Operation ID must be a nonempty normalized string")
+        return self._mutate_memory_store(
+            operation_id,
+            mutator=mutator,
+            normalize=normalize,
+            save=save,
+            owner=owner,
+            changes=changes,
+        )
+
+    # Keep operation_id separate from user changes to prevent memory-key collisions.
+    def _mutate_memory_store(  # noqa: PLR0913
+        self,
+        operation_id: str | None,
+        *,
+        mutator,
+        normalize,
+        save,
+        owner,
+        changes: dict,
+    ):
         self._authorize_tenant_memory()
         with ensure_execution_trace_root(
             operation="memory_write",
@@ -858,11 +942,19 @@ class MemoryStorageBackend:
             io_lock = getattr(self.bot, "_io_lock", None)
             if io_lock is None:
                 return self._run_mutation_commit_path(
-                    mutator=mutator, changes=changes, normalize=normalize, save=save,
+                    mutator=mutator,
+                    changes=changes,
+                    normalize=normalize,
+                    save=save,
+                    operation_id=operation_id,
                 )
             with io_lock:
                 return self._run_mutation_commit_path(
-                    mutator=mutator, changes=changes, normalize=normalize, save=save,
+                    mutator=mutator,
+                    changes=changes,
+                    normalize=normalize,
+                    save=save,
+                    operation_id=operation_id,
                 )
 
     def _run_mutation_commit_path(
@@ -872,6 +964,7 @@ class MemoryStorageBackend:
         changes: dict,
         normalize: bool,
         save: bool,
+        operation_id: str | None,
     ) -> dict:
         """Shared mutation + commit + projection routing logic (lock-agnostic)."""
         local_authority = self._local_authority_backend() is not None
@@ -929,7 +1022,11 @@ class MemoryStorageBackend:
                     raise RuntimeError("Published memory projection differs from committed tenant state")
                 published.append(result)
 
-            self._commit_local_projection(durable_candidate, publish=publish)
+            self._commit_local_projection(
+                durable_candidate,
+                publish=publish,
+                operation_id=operation_id,
+            )
         try:
             if save and local_authority:
                 after_store = published[0]

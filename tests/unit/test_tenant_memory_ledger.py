@@ -375,6 +375,27 @@ def test_tenant_memory_replay_isolation_and_idempotency(tmp_path, backend_type):
     ) == first
 
 
+@pytest.mark.parametrize("backend_type", [FileWALLedgerBackend, CRCFileWALLedgerBackend])
+def test_tenant_memory_replays_exact_committed_source_revision(tmp_path, backend_type):
+    ledger = ExecutionLedger(backend_type(tmp_path / "ledger"))
+    ledger.commit_tenant_memory(
+        tenant_id="a", expected_revision=0, operation_id="one", state={"memories": ["first"]}
+    )
+    ledger.commit_tenant_memory(
+        tenant_id="a", expected_revision=1, operation_id="two", state={"memories": ["second"]}
+    )
+
+    source = ledger.replay_tenant_memory_at_revision("a", 1)
+
+    assert source.revision == 1
+    assert source.state == {"memories": ["first"]}
+    assert list(source.operations) == ["one"]
+    with pytest.raises(ValueError, match="not committed"):
+        ledger.replay_tenant_memory_at_revision("a", 3)
+    with pytest.raises(ValueError, match="nonnegative integer"):
+        ledger.replay_tenant_memory_at_revision("a", True)
+
+
 @pytest.mark.parametrize("state", [{"invalid": float("nan")}, {"bad": (1, 2)}, {1: "not a string"}])
 def test_invalid_memory_is_rejected_before_append(tmp_path, state):
     ledger = ExecutionLedger(FileWALLedgerBackend(tmp_path / "ledger"))

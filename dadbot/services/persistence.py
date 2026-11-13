@@ -651,13 +651,24 @@ class PersistenceService(
 
     def finalize_turn(self, turn_context: Any, result: Any) -> tuple:
         """Atomically commit history, maintenance, reflection, health snapshot, and persistence."""
-        with ensure_execution_trace_root(
-            operation="persistence_finalize_turn",
-            prompt="[persistence-finalize-turn]",
-            metadata={"source": "PersistenceService.finalize_turn"},
-            required=True,
-        ):
-            return self._finalize_turn_impl(turn_context, result)
+        try:
+            with ensure_execution_trace_root(
+                operation="persistence_finalize_turn",
+                prompt="[persistence-finalize-turn]",
+                metadata={"source": "PersistenceService.finalize_turn"},
+                required=True,
+            ):
+                return self._finalize_turn_impl(turn_context, result)
+        except Exception:
+            service = self.turn_service
+            runtime = None if service is None else getattr(service, "bot", None)
+            if runtime is not None:
+                self._record_memory_consolidation_turn_outcome(
+                    runtime,
+                    turn_context,
+                    status="failed",
+                )
+            raise
 
     @staticmethod
     def _finalize_fast_path_if_already_finalized(turn_context: Any, result: Any) -> tuple | None:
@@ -1008,6 +1019,62 @@ class PersistenceService(
             note="after completion event emission",
         )
 
+    def _record_memory_consolidation_turn_outcome(
+        self,
+        runtime: Any,
+        turn_context: Any,
+        *,
+        status: str,
+    ) -> None:
+        from dadbot.core.execution_ledger import ExecutionLedger
+        from dadbot.core.ledger_backend import FileWALLedgerBackend
+        from dadbot.core.memory_consolidation_outbox import (
+            record_memory_consolidation_turn_outcome,
+        )
+
+        ledger = getattr(runtime, "_execution_ledger", None)
+        if not isinstance(ledger, ExecutionLedger):
+            return
+        backend = ledger._backend
+        if not isinstance(backend, FileWALLedgerBackend) or backend._security_mode == "AUTHENTICATED":
+            return
+
+        config = getattr(runtime, "config", None)
+        tenant_id = str(getattr(config, "tenant_id", "") or "default").strip()
+        metadata = getattr(turn_context, "metadata", None)
+        metadata = metadata if isinstance(metadata, dict) else {}
+        control_plane_value = metadata.get("control_plane")
+        control_plane = control_plane_value if isinstance(control_plane_value, dict) else {}
+        session_id = str(
+            control_plane.get("session_id") or metadata.get("session_id") or "default",
+        ).strip()
+        trace_id = str(getattr(turn_context, "trace_id", "") or "").strip()
+        if not trace_id:
+            logger.warning(
+                "Unable to record durable memory consolidation turn outcome: trace ID is missing",
+            )
+            return
+        state = getattr(turn_context, "state", None)
+        state = state if isinstance(state, dict) else {}
+        transaction_value = state.get("_save_transaction")
+        transaction = transaction_value if isinstance(transaction_value, dict) else {}
+        commit_id = str(state.get("last_commit_id") or transaction.get("commit_id") or "")
+        try:
+            record_memory_consolidation_turn_outcome(
+                ledger,
+                (tenant_id, session_id, trace_id),
+                status=status,
+                commit_id=commit_id,
+            )
+        except Exception as exc:
+            state["memory_consolidation_turn_outcome_error"] = type(exc).__name__
+            logger.error(
+                "Unable to record durable memory consolidation turn outcome status=%s trace_id=%s",
+                status,
+                trace_id,
+                exc_info=True,
+            )
+
     def _finalize_turn_impl(self, turn_context: Any, result: Any) -> tuple:
         """Internal finalize implementation executed under an active trace context."""
         fast_path = self._finalize_fast_path_if_already_finalized(turn_context, result)
@@ -1078,6 +1145,11 @@ class PersistenceService(
                     ),
                 },
                 note="finalize_turn success",
+            )
+            self._record_memory_consolidation_turn_outcome(
+                runtime,
+                turn_context,
+                status="succeeded",
             )
             return finalized
         except IntegrityBreachError:

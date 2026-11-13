@@ -1,13 +1,16 @@
 # Agent and Memory Hardening Plan
 
-Date: 2026-11-11  
+Date: 2026-11-13
+
 Status: Milestone 0 has a passing default local baseline. Supported-profile
 authority/recovery acceptance and opt-in, receipt-verified File-WAL loop resume
 are implemented. PostgreSQL/Redis primitives have real-service evidence;
-non-file loop resume, non-SQLite physical projections, goal postconditions, and
-live-model quality remain uncertified. Milestone 2's synthetic File-WAL/SQLite
-observation quality and ingress checks pass, and the final runtime passed its
-unfiltered release gate. Skipped capabilities remain outside certification.
+non-file loop resume, non-SQLite physical projections, provider-specific effect
+verification, caller-specific authoritative goal checks, and live-model quality
+remain uncertified. Receipt-key rotation now supports explicit previous-key
+verification. Milestone 2's synthetic File-WAL/SQLite observation quality and
+ingress checks pass, and the final runtime passed its unfiltered release gate.
+Skipped capabilities remain outside certification.
 
 ## Goal
 
@@ -23,9 +26,9 @@ memory, temporal, and autonomy work.
 
 | Area | Current evidence | Remaining work |
 | --- | --- | --- |
-| Driver Loop | Bounded turns, structured reflection, plan validation, canonical request/run identities, and scoped completion verification exist in [AgentDriverLoop](../dadbot/runtime/agent_driver_loop.py). Successful post-turn processing persists a bounded goal board and hash-only tool outcome summaries. [AssistantRuntime](../dadbot/assistant_runtime.py) reconciles missing progress and offers opt-in, receipt-verified File-WAL resume with durable budgets and a pre-dispatch marker. | Verify goal postconditions; reconcile uncertain external effects and support receipt-key rotation. Non-file loop resume remains explicitly unavailable. |
+| Driver Loop | Bounded turns, structured reflection, plan validation, canonical request/run identities, and scoped completion verification exist in [AgentDriverLoop](../dadbot/runtime/agent_driver_loop.py). Successful post-turn processing persists a bounded goal board and hash-only tool outcome summaries. [AssistantRuntime](../dadbot/assistant_runtime.py) reconciles missing progress and offers opt-in, receipt-verified File-WAL resume with durable budgets and a pre-dispatch marker. Recovery distinguishes definitely-undispatched work from uncertain effects and supports a tenant-admin attestation before replanning. | Provider-specific outcome verification and caller-specific authoritative goal checks remain the verifier's responsibility. Non-file loop resume remains explicitly unavailable. |
 | Memory-first observation | [AssistantRuntime](../dadbot/assistant_runtime.py) uses the read-only `retrieve_context` bundle by default. The versioned synthetic File-WAL/SQLite profile passes measured quality, budget, provenance, isolation, five actual canonical ingress checks, and the unfiltered release gate. | Live-model quality and non-SQLite observation profiles remain uncertified; paraphrase performance is weak with offline embeddings. |
-| Online consolidation | [PersistenceService](../dadbot/services/persistence.py) publishes post-commit readiness; [PostCommitWorker](../dadbot/services/post_commit_worker.py) invokes consolidation. | Durable scheduling, authority propagation, idempotency, meaningful success reporting, and recovery after process loss. |
+| Online consolidation | [PersistenceService](../dadbot/services/persistence.py) records a durable success/failure outcome in the File-WAL ledger before returning from finalization. For trusted-local File-WAL, source commits also carry an atomic outbox marker; [PostCommitWorker](../dadbot/services/post_commit_worker.py) defers unresolved sources, skips failed turns, scans pending work at startup and after readiness events, replays the exact source revision, uses the work ID for idempotent output, and records completion. The durable path accepts strict bounded proposals citing only verified user-message sources, derives source counts/evidence itself, and persists citation IDs. Failed work retries in-process with bounded exponential jitter (1-second base, 30-second cap); restart retries pending work immediately. | Authenticated PostgreSQL and other profiles remain uncertified. Semantic entailment of generated summaries and broader authority/effect reconciliation remain. |
 | Durable memory authority | [MemoryStorageBackend](../dadbot/memory/storage.py) authorizes memory access, fences local index writes, and records tenant-specific projection status. Bridge, worker, snapshot, File-WAL/SQLite recovery, and PostgreSQL/Redis primitive paths have executed acceptance coverage below. | Non-SQLite physical memory projection recovery and authenticated PostgreSQL execution are not certified; do not infer those capabilities from primitive service tests. |
 | Temporal/conflict handling | Reflection receives bounded timestamp/conflict signals. [Bi-temporal edge tests](../tests/test_bitemporal_graph_edges.py) cover existing edge validity fields. | Consistent as-of retrieval, provenance-aware corrections, late-arrival handling, and conflict decisions surviving restart. |
 | Proactivity | A heartbeat processes at most one queued event through the loop; its reflection plan has an empty tool allowlist. | Durable deduplication and worker ownership; verify downstream tool enforcement, not just reflection policy. |
@@ -626,8 +629,14 @@ previous explicit certification limits.
   commits the reconstructed progress through `SESSION_STATE_UPDATED` and never
   redispatches the completed action.
 - Add outcome verification based on tool receipts and required postconditions.
-  Use an optional critic only for ambiguity that deterministic checks cannot
-  settle. Its assessment is not execution authority.
+  A versioned deterministic verifier now receives canonical scoped identities,
+  verified receipt evidence, and hash-only tool outcomes. It returns
+  `satisfied`, `not_satisfied`, or `unknown`; only `satisfied` reports goal
+  completion, `not_satisfied` allows another bounded turn, and `unknown` stops
+  for explicit re-evaluation. Its verifier ID is bound to the durable cursor.
+  The caller must check authoritative post-state; a critic is not execution
+  authority and remains optional for ambiguity deterministic checks cannot
+  settle.
 - The canonical graph now emits receipts after successful, non-skipped stages
   and their after-checkpoints, verifies turn scope, order, HMAC signatures, and
   chain continuity, and stores a bounded envelope in `JOB_COMPLETED` metadata
@@ -635,20 +644,44 @@ previous explicit certification limits.
   least 32 bytes; the default process-random signer is explicitly unavailable
   for durable evidence.
 - Receipts establish signed stage/checkpoint-chain evidence, not goal
-  postcondition success. Partial File-WAL loops can resume after re-verifying
-  canonical completion evidence; uncertain external-effect reconciliation,
-  deterministic postconditions, and key rotation remain open.
-- Use bounded retry/escalation policies that distinguish definitely-undispatched
-  work from uncertain external effects.
-- Feed observed outcomes and consolidation status into the next reflection;
-  receipt-backed outcome verification remains open.
+  postcondition success. The optional deterministic verifier can check caller-
+  defined postconditions against authoritative state and is re-evaluated for
+  pending or unknown outcomes during recovery. Partial File-WAL loops can
+  resume after re-verifying canonical completion evidence. For an interrupted
+  pending request with no canonical job submission/queue/start/terminal or
+  effect evidence, recovery records a failed turn, advances the cursor, and
+  continues only within the persisted failure and turn budgets. Submission,
+  queue, start, terminal, reconciliation, or effect evidence without a valid
+  completion remains uncertain and blocks automatic resend; explicit external-
+  effect reconciliation now requires an authenticated tenant admin to attest
+  that both no external effect occurred and execution is quiesced. This
+  resolution is bound to the exact pending loop run/turn, closes the pending
+  request, and advances it as a failure; the original request is never resent.
+  Provider-verified reconciliation and live operational acceptance remain open.
+  Receipt-key rotation accepts explicitly configured previous verification
+  keys; the current key alone signs new receipts.
+- The versioned receipt-backed verifier and bounded pre-submission recovery are
+  implemented. Feed observed outcomes and consolidation status into reflection;
+  caller-specific authoritative postconditions remain required for goal claims.
 - Focused loop, progress-state, structured-output, facade, ledger-index,
   tool-recording, recovery, and receipt tests passed with isolated pytest
   temporary storage. Targeted Ruff checks and `git diff --check` passed; the
   broader lint selection still reports existing diagnostics in legacy files.
-  The full suite was not rerun for this change. Deterministic postcondition
-  checks, non-file loop recovery, and non-SQLite physical projection
-  certification remain open; supported-profile acceptance evidence is above.
+  Receipt-key rotation passed **110 focused tests**, including recovery across
+  a key change, use of the new key for subsequent receipts, default rejection
+  of unknown keys, and invalid-configuration failures. The full suite was not
+  rerun for that change. The focused loop, recovery, verifier, and receipt
+  selection passed **143 tests**; coverage includes satisfied vs.
+  unsatisfied/unknown results, receipt verification, stable verifier IDs, and
+  crash recovery without another dispatch. Non-file loop recovery and
+  non-SQLite physical projection certification remain open; supported-profile
+  acceptance evidence is above. The agent-loop resume integration selection
+  also passed **46 tests**, including bounded retry for a request with no
+  submission/effect evidence, failure-budget enforcement, and refusal to resend
+  when submission or effect evidence exists. Operator-attestation coverage
+  verifies admin authorization, exact cursor binding, same-request replay
+  rejection, and no-effect state distinct from successful commit. Targeted Ruff
+  and diff checks pass.
 
 ### Execution boundary
 
@@ -703,6 +736,11 @@ idempotency key. A repeated delivery may recompute, but cannot publish duplicate
 Invalid output/revocation leaves authoritative memory unchanged and reports why.
 New accepted facts are retrievable at their committed revision without rebuilding
 the entire index on each observation.
+
+The trusted-local File-WAL source-validation slice passes the focused
+consolidation, proposal-schema, and memory-persistence tests. It checks proposal
+shape and exact citation membership; it does not prove that a generated
+paraphrase is semantically entailed by its cited evidence.
 
 ## 5. Deepen temporal and conflict semantics
 
@@ -828,13 +866,29 @@ Not included: kernel rewrites, a new agent framework, wholesale memory-store
 replacement, unbounded autonomy, policy self-modification, or claims of parity
 with another product without a shared benchmark.
 
-Current execution step: the supported File-WAL/SQLite authority/recovery paths
-and selected PostgreSQL/Redis primitives now have executed acceptance evidence.
+Current execution step: harden online consolidation. The trusted-local
+File-WAL path now gates consolidation on durable turn outcomes and recovers
+tenant/session/trace-linked outbox work from committed ledger evidence across
+the commit/enqueue gap. It replays the exact source revision, uses stable work
+IDs for idempotent publication, acknowledges completion, and retries failed
+work with bounded jitter; restart resumes pending work. Durable proposals use
+a strict bounded schema and must cite verified user-message evidence from that
+source snapshot. The application resolves citations and persists their IDs;
+malformed output and unknown citations skip before mutation. This validates
+shape and source membership, not semantic entailment of generated paraphrases.
+Provider-verified effect reconciliation remains deferred until a provider and
+authoritative operation-status contract are selected. Authenticated PostgreSQL
+and other consolidation profiles remain uncertified; ephemeral post-commit
+context remains in use for forgetting and tool-result indexing.
+The safe File-WAL recovery path supports authenticated tenant-admin no-effect
+attestation, which is not provider proof. Optional versioned goal-postcondition
+verification and receipt-key rotation are implemented for canonical,
+stable-key paths. Milestone 2's synthetic File-WAL/SQLite quality and final
+runtime release gates pass. Milestone 3's safe uncertain-effect recovery is
+implemented for the supported File-WAL profile; provider verification and live
+acceptance remain open.
 Opt-in File-WAL loop recovery is wired to canonical completion receipts.
 Do not promote authenticated PostgreSQL, non-SQLite physical memory projections,
 non-file loop resume, or live-model behavior to certified status.
-Milestone 2's synthetic File-WAL/SQLite quality, bounded evidence, default ingress,
-and final-runtime unfiltered release gates now pass. Next is milestone 3:
-goal postconditions, uncertain-effect reconciliation, and key rotation.
 Service-dependent and other skipped capabilities retain the explicit limits
 recorded above; unexplained long wall-time stalls are not latency certification.

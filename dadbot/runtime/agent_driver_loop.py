@@ -1,17 +1,28 @@
 from __future__ import annotations
 
 from collections.abc import Callable
+from copy import deepcopy
 from dataclasses import asdict, dataclass, field
 from time import perf_counter
 from typing import TYPE_CHECKING, Any, Protocol, cast
 from uuid import uuid4
 
+from dadbot.core.agent_loop_outcome import (
+    AgentLoopOutcomeVerifier,
+    build_agent_loop_outcome_evidence,
+    verify_agent_loop_outcome,
+)
 from dadbot.core.agent_loop_progress import (
     normalize_goal_blackboard,
     normalize_tool_outcome_evidence,
 )
-from dadbot.core.agent_loop_recovery import AgentLoopCursor
+from dadbot.core.agent_loop_recovery import (
+    AgentLoopCursor,
+    validate_agent_loop_policy,
+    verify_completion_receipts,
+)
 from dadbot.core.execution_contract import SovereignContext, TurnDelivery, TurnResponse, live_turn_request
+from dadbot.core.execution_receipt import ReceiptSigner
 from dadbot.runtime.structured_output import AgentPlan, SchemaValidationError, verify_agent_plan
 
 if TYPE_CHECKING:
@@ -34,6 +45,7 @@ class DriverLoopPolicy:
     max_consecutive_noop: int = 2
     allowed_tools: list[str] | None = None
     trigger_type: str = "interactive"
+    outcome_verifier_id: str = ""
 
 
 @dataclass(slots=True)
@@ -47,6 +59,7 @@ class LoopTurnRecord:
     duration_ms: float
     commit_status: str
     error: str = ""
+    outcome_status: str = "unverified"
 
 
 @dataclass(slots=True)
@@ -57,6 +70,7 @@ class DriverLoopResult:
     failures: int = 0
     consecutive_noop: int = 0
     goal_blackboard: dict[str, str] = field(default_factory=dict)
+    goal_status: str = "unverified"
     tool_outcome_evidence: dict[str, Any] = field(default_factory=dict)
     tenant_id: str = "default"
     session_id: str = "default"
@@ -77,6 +91,18 @@ class _LoopTurnContext:
     reflection: dict[str, Any] = field(default_factory=dict)
 
 
+@dataclass(frozen=True, slots=True)
+class _CanonicalCompletionEvidence:
+    tool_outcome_evidence: dict[str, Any]
+    completion: dict[str, Any] | None
+
+
+@dataclass(frozen=True, slots=True)
+class AgentLoopOutcomeVerification:
+    verifier: AgentLoopOutcomeVerifier
+    receipt_signer: ReceiptSigner | None
+
+
 class AgentDriverLoop:
     """Run bounded autonomous turns through the canonical turn contract."""
 
@@ -88,6 +114,7 @@ class AgentDriverLoop:
         event_bus: EventBus | None = None,
         allowed_tools: list[str] | None = None,
         commit_verifier: CanonicalCommitVerifier | None = None,
+        outcome_verification: AgentLoopOutcomeVerification | None = None,
         recovery_cursor: AgentLoopCursor | None = None,
         persist_cursor: Callable[[AgentLoopCursor], None] | None = None,
     ) -> None:
@@ -99,8 +126,19 @@ class AgentDriverLoop:
         self._allowed_tools = None if selected_tools is None else list(selected_tools)
         self._trigger_type = str(self.policy.trigger_type or "interactive")
         self._commit_verifier = commit_verifier
+        self._outcome_verifier = outcome_verification.verifier if outcome_verification is not None else None
+        self._receipt_signer = outcome_verification.receipt_signer if outcome_verification is not None else None
         self._recovery_cursor = recovery_cursor
         self._persist_cursor = persist_cursor
+        validate_agent_loop_policy(asdict(self.policy))
+        if bool(self.policy.outcome_verifier_id) != (outcome_verification is not None):
+            raise ValueError("A versioned outcome verifier and matching policy ID are required")
+        if outcome_verification is not None and (
+            commit_verifier is None
+            or outcome_verification.receipt_signer is None
+            or not outcome_verification.receipt_signer.is_stable
+        ):
+            raise RuntimeError("Goal verification requires canonical completions and a stable receipt signer")
         if (recovery_cursor is None) != (persist_cursor is None):
             raise ValueError("Canonical loop recovery requires both cursor and persistence")
 
@@ -113,14 +151,22 @@ class AgentDriverLoop:
         request_id: str,
         turn: _LoopTurnContext,
         tenant_id: str,
-    ) -> dict[str, Any] | None:
+    ) -> _CanonicalCompletionEvidence | None:
         if self._commit_verifier is None:
-            return normalize_tool_outcome_evidence(None)
+            return _CanonicalCompletionEvidence(
+                tool_outcome_evidence=normalize_tool_outcome_evidence(None),
+                completion=None,
+            )
         completion = self._commit_verifier(request_id, turn.session_id, tenant_id)
         if completion is None or completion is False:
             return None
         if completion is True:
-            return normalize_tool_outcome_evidence(None)
+            if self._outcome_verifier is not None:
+                raise ValueError("Goal verification requires canonical completion metadata")
+            return _CanonicalCompletionEvidence(
+                tool_outcome_evidence=normalize_tool_outcome_evidence(None),
+                completion=None,
+            )
         if type(completion) is not dict:
             raise TypeError("Canonical completion lookup returned an unsupported value")
         if (
@@ -142,12 +188,48 @@ class AgentDriverLoop:
             or loop_metadata.get("loop_run_id") != turn.loop_run_id
             or type(loop_metadata.get("turn_index")) is not int
             or loop_metadata.get("turn_index") != turn.turn_index
+            or loop_metadata.get("outcome_verifier_id", "") != self.policy.outcome_verifier_id
         ):
             raise ValueError("Canonical completion metadata does not match the dispatched loop turn")
-        return normalize_tool_outcome_evidence(
-            metadata.get("tool_outcome_evidence"),
-            expected_trace_id=completion["trace_id"],
+        if self._outcome_verifier is not None:
+            self._verify_completion_receipts(completion)
+        return _CanonicalCompletionEvidence(
+            tool_outcome_evidence=normalize_tool_outcome_evidence(
+                metadata.get("tool_outcome_evidence"),
+                expected_trace_id=completion["trace_id"],
+            ),
+            completion=deepcopy(completion),
         )
+
+    def _verify_completion_receipts(self, completion: dict[str, Any]) -> None:
+        if self._receipt_signer is None:
+            raise RuntimeError("Goal verification has no configured receipt signer")
+        verify_completion_receipts(completion, self._receipt_signer)
+
+    def _verify_turn_outcome(
+        self,
+        result: DriverLoopResult,
+        completion: dict[str, Any] | None,
+        should_end: bool,
+    ) -> str:
+        if self._outcome_verifier is None:
+            return "unverified"
+        if completion is None:
+            raise ValueError("Goal verification requires canonical completion metadata")
+        evidence = build_agent_loop_outcome_evidence(completion, should_end=should_end)
+        status = verify_agent_loop_outcome(self._outcome_verifier, evidence)
+        result.goal_status = status
+        return status
+
+    @staticmethod
+    def _outcome_stop_reason(outcome_status: str, should_end: bool) -> str:
+        if outcome_status == "satisfied":
+            return "goal_satisfied"
+        if outcome_status == "unknown":
+            return "outcome_unverified"
+        if should_end and outcome_status != "not_satisfied":
+            return "kernel_should_end"
+        return ""
 
     @staticmethod
     def _coerce_turn_result(response_obj: Any) -> tuple[str, bool]:
@@ -320,6 +402,7 @@ class AgentDriverLoop:
                             "schema_version": 1,
                             "loop_run_id": turn.loop_run_id,
                             "turn_index": turn.turn_index,
+                            "outcome_verifier_id": self.policy.outcome_verifier_id,
                             "goal_blackboard": dict(sorted(result.goal_blackboard.items())),
                             "goal_updates": dict(turn.reflection.get("goal_updates") or {}),
                             "plan_verification": "passed",
@@ -387,7 +470,12 @@ class AgentDriverLoop:
             result.stop_reason = "commit_unverified"
             return last_reply, last_action_input, True
 
-        result.tool_outcome_evidence = completion_evidence
+        result.tool_outcome_evidence = completion_evidence.tool_outcome_evidence
+        outcome_status = self._verify_turn_outcome(
+            result,
+            completion_evidence.completion,
+            should_end,
+        )
         result.records.append(
             LoopTurnRecord(
                 turn_index=turn.turn_index,
@@ -398,6 +486,7 @@ class AgentDriverLoop:
                 should_end=should_end,
                 duration_ms=elapsed_ms,
                 commit_status="committed",
+                outcome_status=outcome_status,
             ),
         )
         result.completed_turns += 1
@@ -417,14 +506,16 @@ class AgentDriverLoop:
                 "action_type": action_type,
                 "action_input": turn.action_input,
                 "commit_status": "committed",
+                "outcome_status": outcome_status,
                 "reply": reply,
                 "should_end": should_end,
                 "duration_ms": elapsed_ms,
                 "consecutive_noop": result.consecutive_noop,
             },
         )
-        if should_end:
-            result.stop_reason = "kernel_should_end"
+        stop_reason = self._outcome_stop_reason(outcome_status, should_end)
+        if stop_reason:
+            result.stop_reason = stop_reason
             return reply, turn.action_input, True
         if result.consecutive_noop >= int(self.policy.max_consecutive_noop):
             result.stop_reason = "noop_threshold"
@@ -447,6 +538,16 @@ class AgentDriverLoop:
             return str(observation_hook(turn.reflection_context) or "")
         return default_observation
 
+    def _restore_goal_status(self, result: DriverLoopResult, cursor: AgentLoopCursor | None) -> None:
+        if self._outcome_verifier is None or cursor is None:
+            return
+        if cursor.stop_reason == "goal_satisfied":
+            result.goal_status = "satisfied"
+        elif cursor.stop_reason == "outcome_unverified":
+            result.goal_status = "unknown"
+        elif cursor.last_request_id:
+            result.goal_status = "not_satisfied"
+
     def run(
         self,
         initial_observation: str,
@@ -466,6 +567,7 @@ class AgentDriverLoop:
             session_id=str(session_id or "default"),
         )
         cursor = self._recovery_cursor
+        self._restore_goal_status(result, cursor)
         loop_run_id = cursor.loop_run_id if cursor is not None else uuid4().hex
         last_reply = initial_reply
         last_action_input = cursor.last_action_input if cursor is not None else str(initial_observation or "")
@@ -515,6 +617,7 @@ class AgentDriverLoop:
                 "records": list(result.records),
                 "system_observation": pending_system_observation,
                 "goal_blackboard": dict(result.goal_blackboard),
+                "goal_status": result.goal_status,
                 "tool_outcome_evidence": result.tool_outcome_evidence,
             }
             turn = _LoopTurnContext(

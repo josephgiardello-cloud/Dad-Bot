@@ -11,6 +11,7 @@ from contextvars import copy_context
 from datetime import date
 from threading import Barrier
 from time import perf_counter
+from typing import Any
 from unittest.mock import AsyncMock
 
 import pytest
@@ -351,7 +352,7 @@ def test_default_ingresses_use_native_memory_evidence(observation_bot, monkeypat
         assert result["status"] == "processed"
     else:
         policy = DriverLoopPolicy(max_turns=2)
-        options = {"durable": True} if entry in {"durable", "resume"} else {}
+        options: dict[str, Any] = {"durable": True} if entry in {"durable", "resume"} else {}
         if entry == "resume":
             def interrupt_second(context):
                 if context["turn_index"] == 2:
@@ -398,7 +399,7 @@ def test_explicit_memory_opt_out_does_not_query(observation_bot, monkeypatch, tm
         pytest.fail("Explicit observation opt-out called the default memory provider")
 
     monkeypatch.setattr(bot.memory_query, "retrieve_context", forbidden)
-    options = (
+    options: dict[str, Any] = (
         {"enable_semantic_memory": False} if opt_out == "disabled"
         else {"observation_hook": lambda _ctx: "custom"}
     )

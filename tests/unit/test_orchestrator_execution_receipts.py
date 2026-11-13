@@ -132,3 +132,42 @@ def test_resume_reverifies_receipts_instead_of_trusting_verified_label(damage):
         receipt["completed_at"] = float("nan")
     with pytest.raises(ValueError, match="receipt"):
         verify_completion_receipts(completion, signer)
+
+
+def test_resume_verifies_receipts_with_an_explicit_previous_key():
+    from dadbot.core.agent_loop_recovery import verify_completion_receipts
+    from dadbot.core.execution_receipt import ReceiptSigner
+
+    previous_key = b"previous-receipt-key-material-00001"
+    previous_signer = ReceiptSigner(previous_key)
+    rotated_signer = ReceiptSigner(
+        b"current-receipt-key-material-00001",
+        verification_keys=(previous_key,),
+    )
+    receipt = previous_signer.sign(
+        turn_id="trace",
+        stage="save",
+        sequence=1,
+        stage_call_id="call",
+        checkpoint_hash="a" * 64,
+        prev_receipt_sig="",
+    )
+    completion = {
+        "trace_id": "trace",
+        "metadata": {
+            "execution_receipt_status": "verified",
+            "execution_receipt_evidence": {
+                "schema_version": 1,
+                "trace_id": "trace",
+                "key_id": previous_signer.key_id,
+                "stages": ["save"],
+                "receipts": [receipt.to_dict()],
+            },
+        },
+    }
+
+    verify_completion_receipts(completion, rotated_signer)
+
+    completion["metadata"]["execution_receipt_evidence"]["key_id"] = rotated_signer.key_id
+    with pytest.raises(ValueError, match="receipt"):
+        verify_completion_receipts(completion, rotated_signer)

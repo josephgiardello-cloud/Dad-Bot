@@ -7,6 +7,7 @@ import re
 import uuid
 from collections import Counter
 from datetime import date, datetime, timezone
+from typing import Any
 
 from dadbot.memory.conflict_detector import ConflictDetector
 from dadbot.memory.scoring import MemoryScorer
@@ -16,6 +17,7 @@ from dadbot.services.memory_service import (
     MEMORY_FACT_EXTRACTION_PROMPT,
     USER_MESSAGE_TRUST_LEVEL,
     extract_facts,
+    validate_memory_consolidation_proposals,
 )
 
 logger = logging.getLogger(__name__)
@@ -1001,9 +1003,21 @@ If none are strongly relevant, return an empty array [].
                 return False
         return True
 
-    def build_memory_consolidation_prompt(self, memories, existing_insights):
+    def build_memory_consolidation_prompt(
+        self,
+        memories,
+        existing_insights,
+        *,
+        require_source_refs: bool = False,
+    ):
         memory_lines = [
-            f"- [{memory.get('category', 'general')}, mood={self.bot.normalize_mood(memory.get('mood'))}] {memory.get('summary', '')}"
+            (
+                f"- [source_ref={memory['consolidation_source_ref']}] "
+                if require_source_refs
+                else "- "
+            )
+            + f"[{memory.get('category', 'general')}, mood={self.bot.normalize_mood(memory.get('mood'))}] "
+            + str(memory.get("summary") or "")
             for memory in memories[-18:]
             if memory.get("summary")
         ]
@@ -1020,6 +1034,49 @@ If none are strongly relevant, return an empty array [].
             for item in self.detect_memory_contradictions(memories, existing_insights)[:6]
         ] or ["- None detected."]
 
+        output_contract = (
+            """
+Return only JSON as an array of up to 6 objects with exactly these keys:
+- summary
+- category
+- source_refs
+
+Rules:
+- source_refs must contain one or more source_ref values shown below.
+- Cite only sources that support the proposed summary. Do not invent references.
+- Keep each summary under 22 words.
+"""
+            if require_source_refs
+            else """
+Return only JSON as an array of up to 6 objects with keys:
+- summary
+- category
+- source_count
+- confidence
+- supporting_summaries
+- contradictions
+"""
+        )
+        rules = (
+            """
+Rules:
+- Write higher-level durable insights, not one-off diary lines.
+- Preserve uncertainty, stay specific and modest, and do not invent facts.
+- Prefer stable patterns, ongoing concerns, recurring goals, or notable progress.
+"""
+            if require_source_refs
+            else """
+Rules:
+- Write higher-level durable insights, not one-off diary lines.
+- Merge overlapping memories into one clearer long-term fact when possible.
+- If sources conflict, lower confidence and mention the contradiction briefly.
+  Do not pretend the conflict does not exist.
+- Confidence should be a number from 0.05 to 0.98, based on source agreement, repetition, and recency.
+- Preserve uncertainty by staying specific and modest; do not invent anything.
+- Prefer stable patterns, ongoing concerns, recurring goals, or notable positive progress.
+- Keep each summary under 22 words.
+"""
+        )
         return f"""
 You are consolidating long-term memory about Tony from repeated prior conversations.
 
@@ -1032,23 +1089,69 @@ Possible contradictions or tension points:
 Recent durable memories:
 {chr(10).join(memory_lines)}
 
-Return only JSON as an array of up to 6 objects with keys:
-- summary
-- category
-- source_count
-- confidence
-- supporting_summaries
-- contradictions
-
-Rules:
-- Write higher-level durable insights, not one-off diary lines.
-- Merge overlapping memories into one clearer long-term fact when possible.
-- If sources conflict, lower confidence and mention the contradiction briefly instead of pretending the conflict does not exist.
-- Confidence should be a number from 0.05 to 0.98, based on source agreement, repetition, and recency.
-- Preserve uncertainty by staying specific and modest; do not invent anything.
-- Prefer stable patterns, ongoing concerns, recurring goals, or notable positive progress.
-- Keep each summary under 22 words.
+{output_contract}
+{rules}
 """.strip()
+
+    def _build_durable_consolidation_sources(
+        self,
+        work: dict[str, Any],
+        memories: list[Any],
+    ) -> tuple[list[dict[str, Any]], dict[str, dict[str, str]]]:
+        prompt_sources: list[dict[str, Any]] = []
+        source_refs: dict[str, dict[str, str]] = {}
+        work_id = str(work.get("work_id") or "")
+        for index, memory in enumerate(memories):
+            if not isinstance(memory, dict):
+                continue
+            summary = str(memory.get("summary") or "").strip()
+            provenance = memory.get("provenance")
+            if not summary or not isinstance(provenance, dict):
+                continue
+            evidence = str(provenance.get("evidence") or "").strip()
+            trust_level = provenance.get("trust_level")
+            if (
+                provenance.get("source") != "user_message"
+                or not evidence
+                or isinstance(trust_level, bool)
+                or not isinstance(trust_level, (int, float))
+                or trust_level < USER_MESSAGE_TRUST_LEVEL
+                or self.bot.normalize_memory_text(summary)
+                != self.bot.normalize_memory_text(evidence)
+            ):
+                continue
+            source_ref = f"{work_id}:memory:{index}"
+            source_refs[source_ref] = {"summary": summary}
+            prompt_sources.append({
+                "summary": summary,
+                "category": memory.get("category") or "general",
+                "mood": memory.get("mood") or "neutral",
+                "consolidation_source_ref": source_ref,
+            })
+        return prompt_sources[-18:], {
+            entry["consolidation_source_ref"]: source_refs[entry["consolidation_source_ref"]]
+            for entry in prompt_sources[-18:]
+        }
+
+    @staticmethod
+    def _attach_consolidation_sources(
+        proposals: list[Any],
+        source_refs: dict[str, dict[str, str]],
+    ) -> list[dict[str, Any]]:
+        attached: list[dict[str, Any]] = []
+        for proposal in proposals:
+            refs = list(proposal.source_refs)
+            if any(ref not in source_refs for ref in refs):
+                raise ValueError("Memory consolidation cited an unknown source reference")
+            attached.append({
+                "summary": proposal.summary,
+                "category": proposal.category,
+                "source_count": len(refs),
+                "supporting_source_ids": refs,
+                "supporting_summaries": [source_refs[ref]["summary"] for ref in refs],
+                "contradictions": [],
+            })
+        return attached
 
     def _with_consolidated_defaults(self, entry):
         normalized = self.bot.normalize_consolidated_memory_entry(entry)
@@ -1173,11 +1276,17 @@ Rules:
             if self.consolidated_entry_rank(incoming) >= self.consolidated_entry_rank(existing)
             else existing
         )
+        supporting_source_ids = self._merge_support_lists(
+            list(existing.get("supporting_source_ids", [])),
+            list(incoming.get("supporting_source_ids", [])),
+            limit=24,
+        )
         return {
             **dict(preferred),
             "source_count": max(
                 existing.get("source_count", 1),
                 incoming.get("source_count", 1),
+                len(supporting_source_ids),
             ),
             "confidence": max(
                 existing.get("confidence", 0.0),
@@ -1191,6 +1300,7 @@ Rules:
                 existing.get("version", 1),
                 incoming.get("version", 1),
             ),
+            "supporting_source_ids": supporting_source_ids,
             "supporting_summaries": self._merge_support_lists(
                 list(existing.get("supporting_summaries", [])),
                 list(incoming.get("supporting_summaries", [])),
@@ -1399,6 +1509,190 @@ Rules:
         )
         self.bot.mark_memory_graph_dirty()
         return merged
+
+    def _verified_durable_consolidation_source(
+        self,
+        work: dict[str, Any],
+        source_state: dict[str, Any],
+    ) -> tuple[Any, dict[str, Any]]:
+        from dadbot.core.ledger_backend import FileWALLedgerBackend
+        from dadbot.core.memory_consolidation_outbox import MEMORY_CONSOLIDATION_POLICY_VERSION
+        from dadbot.core.tenant_memory_ledger import validate_tenant_memory_state
+
+        ledger = getattr(self.bot, "_execution_ledger", None)
+        if ledger is None:
+            raise RuntimeError("Durable consolidation requires an execution ledger")
+        backend = getattr(ledger, "_backend", None)
+        if (
+            not isinstance(backend, FileWALLedgerBackend)
+            or backend._security_mode == "AUTHENTICATED"
+        ):
+            raise RuntimeError("Durable consolidation requires trusted-local File-WAL authority")
+
+        tenant_id = str(work.get("tenant_id") or "")
+        session_id = str(work.get("session_id") or "")
+        trace_id = str(work.get("trace_id") or "")
+        work_id = str(work.get("work_id") or "")
+        if (
+            not tenant_id
+            or tenant_id != str(getattr(getattr(self.bot, "config", None), "tenant_id", "") or "")
+            or not session_id
+            or not trace_id
+            or not work_id
+            or work.get("policy_version") != MEMORY_CONSOLIDATION_POLICY_VERSION
+        ):
+            raise ValueError("Durable consolidation work identity is incomplete")
+
+        source = ledger.replay_tenant_memory_at_revision(
+            tenant_id,
+            work["source_revision"],
+        )
+        operation = source.operations.get(str(work.get("source_operation_id") or ""))
+        source_payload = dict((operation or {}).get("event", {}).get("payload") or {})
+        source_marker = source_payload.get("consolidation_work")
+        if (
+            operation is None
+            or not isinstance(source_marker, dict)
+            or source_marker.get("work_id") != work_id
+            or source_marker.get("policy_version") != MEMORY_CONSOLIDATION_POLICY_VERSION
+            or source_marker.get("source_operation_id") != work.get("source_operation_id")
+            or source_payload.get("revision") != work["source_revision"]
+            or source_payload.get("operation_id") != work.get("source_operation_id")
+            or operation["event"].get("session_id") != session_id
+            or operation["event"].get("trace_id") != trace_id
+        ):
+            raise RuntimeError("Durable consolidation source no longer matches its committed work item")
+        committed_source = validate_tenant_memory_state(operation["state"])
+        if committed_source != validate_tenant_memory_state(source_state):
+            raise RuntimeError("Durable consolidation source snapshot changed")
+        return ledger, committed_source
+
+    def _consolidate_verified_durable_source(
+        self,
+        work: dict[str, Any],
+        committed_source: dict[str, Any],
+        timestamp: str,
+        source_date: str,
+    ) -> str:
+        manager = getattr(self.bot, "memory_manager", None)
+        mutate_idempotently = getattr(manager, "mutate_memory_store_idempotently", None)
+        if not callable(mutate_idempotently):
+            raise RuntimeError("Durable consolidation requires an initialized memory manager")
+
+        memories = list(committed_source.get("memories") or [])
+        prompt_sources, source_refs = self._build_durable_consolidation_sources(
+            work,
+            memories,
+        )
+        if len(prompt_sources) < 3:
+            logger.info(
+                "Skipping durable consolidation without three verified user-evidence sources work_id=%s",
+                work.get("work_id"),
+            )
+            return "skipped"
+        if str(committed_source.get("last_consolidated_at") or "").strip() == source_date:
+            last_count = int(committed_source.get("last_consolidated_memory_count") or 0)
+            if len(memories) - last_count < 3:
+                return "skipped"
+
+        response = self.bot.call_ollama_chat(
+            messages=[{
+                "role": "user",
+                "content": self.build_memory_consolidation_prompt(
+                    prompt_sources,
+                    list(committed_source.get("consolidated_memories") or []),
+                    require_source_refs=True,
+                ),
+            }],
+            options={"temperature": 0.1},
+            response_format="json",
+            purpose="memory consolidation",
+        )
+        content = self.bot.extract_ollama_message_content(response)
+        try:
+            parsed = self.bot.parse_model_json_content(content)
+            proposals = validate_memory_consolidation_proposals(parsed)
+            validated_proposals = self._attach_consolidation_sources(
+                proposals,
+                source_refs,
+            )
+        except (TypeError, ValueError) as exc:
+            logger.warning(
+                "Skipping durable consolidation with invalid cited output work_id=%s error=%s",
+                work.get("work_id"),
+                exc,
+            )
+            return "skipped"
+        if not validated_proposals:
+            return "skipped"
+
+        normalized = self._normalize_merge_inputs(validated_proposals)
+        clustered = self._cluster_memories(normalized)
+        merged_values = self._enforce_merge_constraints(list(clustered.values()))
+        resolved_values, _ = self._resolve_conflicts(
+            merged_values,
+            now_stamp=timestamp,
+        )
+        merged = self._enforce_merge_constraints(resolved_values)
+        mutate_idempotently(
+            operation_id=work["work_id"],
+            consolidated_memories=merged,
+            last_consolidated_at=source_date,
+            last_consolidated_memory_count=len(memories),
+        )
+        self.bot.mark_memory_graph_dirty()
+        return "succeeded"
+
+    def consolidate_memories_from_source(
+        self,
+        work: dict[str, Any],
+        source_state: dict[str, Any],
+    ) -> str:
+        from dadbot.core.execution_context import (
+            ExecutionTraceRecorder,
+            bind_core_state,
+            bind_execution_trace,
+        )
+        from dadbot.core.tenant_session import tenant_session_scope
+
+        ledger, committed_source = self._verified_durable_consolidation_source(
+            work,
+            source_state,
+        )
+        tenant_id = str(work["tenant_id"])
+        session_id = str(work["session_id"])
+        trace_id = str(work["trace_id"])
+        work_id = str(work["work_id"])
+        current = ledger.replay_tenant_memory(tenant_id)
+        if work_id in current.operations:
+            return "succeeded"
+
+        timestamp = str(work.get("source_timestamp") or "")
+        try:
+            source_date = date.fromisoformat(timestamp[:10]).isoformat()
+        except ValueError as exc:
+            raise ValueError("Durable consolidation source timestamp is invalid") from exc
+
+        manager = getattr(self.bot, "memory_manager", None)
+        bind_state = getattr(manager, "memory_core_state", None)
+        if not callable(bind_state):
+            raise RuntimeError("Durable consolidation requires an initialized memory manager")
+        recorder = ExecutionTraceRecorder(
+            trace_token=trace_id,
+            prompt="[durable-memory-consolidation]",
+            metadata={"outbox_work_id": work_id, "source_revision": work["source_revision"]},
+        )
+        with (
+            tenant_session_scope(tenant_id, session_id, allow_tenant_switch=True),
+            bind_execution_trace(recorder, required=True),
+            bind_core_state(bind_state()),
+        ):
+            return self._consolidate_verified_durable_source(
+                work,
+                committed_source,
+                timestamp,
+                source_date,
+            )
 
     def session_topics_from_history(self, history):
         topic_counts = {}

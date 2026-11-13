@@ -7,6 +7,7 @@ import threading
 import uuid
 import hashlib
 import json
+from typing import Any
 
 import pytest
 
@@ -685,7 +686,8 @@ def test_postgres_primitive_certification_does_not_enable_loop_resume(
         ReceiptSigner(b"test-only-loop-receipt-key-000001"),
     )
     before = bot._execution_ledger.event_count()
-    for options in ({"durable": True}, {"resume": True}):
+    options_to_test: tuple[dict[str, Any], ...] = ({"durable": True}, {"resume": True})
+    for options in options_to_test:
         with pytest.raises(RuntimeError, match="non-file recovery is not certified"):
             AssistantRuntime(bot).run_agent_loop("goal", **options)
     assert bot._execution_ledger.event_count() == before

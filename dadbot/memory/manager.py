@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import logging
+from collections.abc import Callable
 from datetime import date
 from uuid import uuid4
 
@@ -88,15 +89,15 @@ class MemoryManager(MemoryLifecycleMixin, MemorySearchMixin, MemoryIntegrationMi
 
     def store(self, key: str, value: object) -> None:
         """Store a value in the memory store under the given key."""
-        self.mutate_memory_store(**{key: value})
+        self.mutate_memory_store(
+            mutator=lambda store: store.__setitem__(key, value),
+        )
 
     def delete(self, key: str) -> None:
         """Delete a value from the memory store by key."""
-        if hasattr(self._storage, "delete"):
-            self._storage.delete(key)
-        else:
-            # Fallback: set the key to None (legacy behavior)
-            self.mutate_memory_store(**{key: None})
+        self.mutate_memory_store(
+            mutator=lambda store: store.__setitem__(key, None),
+        )
 
     def __init__(self, bot: DadBotContext | SupportsDadBotAccess):
         # Defer all property access on bot until initialize()
@@ -305,6 +306,43 @@ class MemoryManager(MemoryLifecycleMixin, MemorySearchMixin, MemoryIntegrationMi
         self.mutate_memory_store(mutator=delete)
 
     def mutate_memory_store(self, mutator=None, normalize=True, save=True, **changes):
+        return self._mutate_memory_store(
+            lambda storage: storage.mutate_memory_store(
+                mutator=mutator,
+                normalize=normalize,
+                save=save,
+                owner="MemoryManager",
+                **changes,
+            ),
+        )
+
+    def mutate_memory_store_idempotently(
+        self,
+        *,
+        operation_id: str,
+        mutator=None,
+        normalize=True,
+        save=True,
+        **changes,
+    ):
+        if (
+            not isinstance(operation_id, str)
+            or not operation_id
+            or operation_id != operation_id.strip()
+        ):
+            raise ValueError("Operation ID must be a nonempty normalized string")
+        return self._mutate_memory_store(
+            lambda storage: storage.mutate_memory_store_idempotently(
+                operation_id=operation_id,
+                mutator=mutator,
+                normalize=normalize,
+                save=save,
+                owner="MemoryManager",
+                **changes,
+            ),
+        )
+
+    def _mutate_memory_store(self, storage_mutation: Callable[[MemoryStorageBackend], dict]):
         with (
             ensure_execution_trace_root(
                 operation="memory_write",
@@ -314,13 +352,10 @@ class MemoryManager(MemoryLifecycleMixin, MemorySearchMixin, MemoryIntegrationMi
             ),
             MemoryWriteOwnerScope.bind("MemoryManager"),
         ):
-            return self._storage.mutate_memory_store(
-                mutator=mutator,
-                normalize=normalize,
-                save=save,
-                owner="MemoryManager",
-                **changes,
-            )
+            storage = self._storage
+            if storage is None:
+                raise RuntimeError("Memory storage backend is unavailable")
+            return storage_mutation(storage)
 
 
 __all__ = ["MemoryManager"]

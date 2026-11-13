@@ -142,11 +142,18 @@ class ReceiptSigner:
     A random 32-byte key is generated per process by default and is not stable.
     Durable receipt evidence requires at least 32 bytes of explicitly configured
     key material via ``secret_key`` or ``DADBOT_RECEIPT_KEY``.
+    Prior keys can be supplied for verification only via ``verification_keys``
+    or the ``DADBOT_RECEIPT_VERIFY_KEYS`` JSON-array environment variable.
     """
 
     _ENV_VAR = "DADBOT_RECEIPT_KEY"
 
-    def __init__(self, secret_key: bytes | None = None) -> None:
+    def __init__(
+        self,
+        secret_key: bytes | None = None,
+        *,
+        verification_keys: Sequence[bytes] | None = None,
+    ) -> None:
         env_key = os.environ.get(self._ENV_VAR, "")
         if secret_key:
             self._key = secret_key
@@ -159,6 +166,32 @@ class ReceiptSigner:
             self._key = os.urandom(32)
             self._is_stable = False
 
+        if verification_keys is None:
+            encoded_previous_keys = os.environ.get("DADBOT_RECEIPT_VERIFY_KEYS", "")
+            if encoded_previous_keys:
+                try:
+                    configured_previous_keys = json.loads(encoded_previous_keys)
+                except json.JSONDecodeError as exc:
+                    raise ValueError("DADBOT_RECEIPT_VERIFY_KEYS must be a JSON array of key strings") from exc
+                if (
+                    type(configured_previous_keys) is not list
+                    or any(type(key) is not str for key in configured_previous_keys)
+                ):
+                    raise ValueError("DADBOT_RECEIPT_VERIFY_KEYS must be a JSON array of key strings")
+                verification_keys = tuple(key.encode("utf-8") for key in configured_previous_keys)
+            else:
+                verification_keys = ()
+
+        self._verification_keys: dict[str, bytes] = {self.key_id: self._key}
+        for key in verification_keys:
+            if type(key) is not bytes or len(key) < 32:
+                raise ValueError("Execution receipt verification keys must contain at least 32 bytes")
+            key_id = hashlib.sha256(key).hexdigest()[:16]
+            existing_key = self._verification_keys.get(key_id)
+            if existing_key is not None and not hmac.compare_digest(existing_key, key):
+                raise ValueError("Execution receipt key identifier collision")
+            self._verification_keys[key_id] = key
+
     @property
     def is_stable(self) -> bool:
         """Whether this signer uses explicitly configured, sufficiently strong key material."""
@@ -168,6 +201,10 @@ class ReceiptSigner:
     def key_id(self) -> str:
         """Non-secret identifier for matching receipts to their signing key."""
         return hashlib.sha256(self._key).hexdigest()[:16]
+
+    def can_verify_key_id(self, key_id: str) -> bool:
+        """Return whether this signer is configured to verify receipts for *key_id*."""
+        return type(key_id) is str and key_id in self._verification_keys
 
     def sign(
         self,
@@ -203,9 +240,12 @@ class ReceiptSigner:
             signature=sig,
         )
 
-    def verify(self, receipt: ExecutionReceipt) -> bool:
-        """Return True if *receipt* has a valid signature for this signer's key."""
-        return receipt.is_valid(self._key)
+    def verify(self, receipt: ExecutionReceipt, *, key_id: str | None = None) -> bool:
+        """Return True if *receipt* is signed by the active or an accepted verification key."""
+        if key_id is not None:
+            key = self._verification_keys.get(key_id) if type(key_id) is str else None
+            return key is not None and receipt.is_valid(key)
+        return any(receipt.is_valid(key) for key in self._verification_keys.values())
 
 
 # ---------------------------------------------------------------------------
@@ -306,6 +346,7 @@ class ReceiptChain:
         *,
         expected_stages: Sequence[str] | None = None,
         expected_turn_id: str | None = None,
+        key_id: str | None = None,
     ) -> list[ContinuityViolation]:
         """Verify the integrity of the receipt chain.
 
@@ -336,7 +377,7 @@ class ReceiptChain:
                 )
 
             # Check signature.
-            if not signer.verify(receipt):
+            if not signer.verify(receipt, key_id=key_id):
                 violations.append(
                     ContinuityViolation(
                         receipt_index=i,

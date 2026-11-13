@@ -366,7 +366,12 @@ Local-WAL graph refresh reads committed tenant sources even when runtime state h
    least 32 bytes, consistently across processes, to enable signed stage receipts
    in agent-loop completion metadata. If absent or too short, turns continue
    normally but durable receipts are reported unavailable. Keep the key secret;
-   key rotation/reconciliation of older receipts is not yet supported.
+   to rotate it while older durable loops may still need recovery, set
+   `DADBOT_RECEIPT_VERIFY_KEYS` to a JSON array of previous key strings (each at
+   least 32 UTF-8 bytes). The active key signs new receipts; previous keys are
+   accepted only for verification. Remove a previous key only after no pending
+   loop recovery depends on it. Invalid verification-key configuration fails
+   at startup.
 4. Keep `.env` local and uncommitted
 
 The install script will guide you through the rest.
@@ -382,22 +387,54 @@ callables are not persisted.
 
 Recovery verifies the exact canonical completion, receipt signatures, trace,
 stage order, and chain before continuing with the remaining turn/failure/no-op
-budgets. A pending dispatch without valid completion evidence blocks both resume
-and new loop runs: it is never automatically resent. Completed runs return their
-recorded counters without calling the model or executing another turn. Returned
-records describe only this invocation; counters include recovered committed
-turns. Cursor action/system-observation text is bounded to 16,384 characters.
+budgets. If a pending request has no canonical submission, queue, start,
+completion, failure, reconciliation, or effect evidence, recovery records a
+failed turn and may continue within the configured failure and turn budgets;
+it does not resend that request. Any such evidence without a valid completion
+keeps the dispatch uncertain and blocks automatic resend. Completed runs return
+their recorded counters without calling the model or executing another turn.
+Returned records describe only this invocation; counters include recovered
+committed turns. Cursor action/system-observation text is bounded to 16,384
+characters.
+
+An authorized operator can explicitly attest to a dispatched loop request via
+`ExecutionControlPlane.attest_agent_loop_dispatch_not_applied(AgentLoopNoEffectAttestation(...))`.
+The attestation must match the pending loop run and turn, confirm both that no
+external effect occurred and that execution is quiesced, and run under
+authenticated `admin` authority for the tenant. It is recorded with a
+privacy-preserving operator reference. Recovery then accounts for the
+interrupted turn as failed and replans within the saved budgets; it never
+resends the original request. A `resume_eligible` reconciliation without this
+attestation, including one applied automatically at boot, does not release an
+agent-loop cursor.
+
+Goal completion can be checked with a versioned deterministic verifier on a
+durable loop. Set `DriverLoopPolicy(outcome_verifier_id="yourapp.goal.v1")`,
+pass an `outcome_verifier` callback, and call `run_agent_loop(..., durable=True)`.
+It receives tenant/session and
+canonical request/job/trace identities, bounded goal proposals, hash-only tool
+outcomes, and receipt evidence already verified with the configured stable key.
+Return exactly `"satisfied"`, `"not_satisfied"`, or `"unknown"`. Only
+`"satisfied"` reports `goal_status="satisfied"` and stops as `goal_satisfied`;
+`"not_satisfied"` permits another bounded turn, while `"unknown"` stops without
+claiming success and requires an explicit resume to recheck. Keep the verifier
+ID stable and change it when its semantics change; durable resume requires the
+same ID and callback. The goal blackboard remains progress input, not proof of
+completion. The verifier should check authoritative post-state, not trust
+reflection text.
 
 The cursor is a `SESSION_STATE_UPDATED` projection, not a standalone loop
 snapshot. Local snapshots remain diagnostics and are neither imported nor used
 to authorize replay. Same-tenant/session File-WAL loop runs share a cross-process
 claim; the WAL lock is not held across canonical execution. Signed stage receipts
-prove execution-chain integrity, not goal postconditions.
+prove execution-chain integrity, not goal postconditions; the optional verifier
+combines verified receipts with caller-owned authoritative post-state checks.
 
 PostgreSQL/Redis primitive integration tests do not enable non-file loop resume.
 Authenticated PostgreSQL execution remains unsupported, and non-SQLite physical
-memory projection recovery is not certified. Receipt-key rotation and uncertain
-external-effect reconciliation require separate work.
+memory projection recovery is not certified. Prior receipt keys can be supplied
+through `DADBOT_RECEIPT_VERIFY_KEYS` during a rotation window. Uncertain
+external-effect reconciliation remains separate work.
 
 ### Memory retrieval and performance
 

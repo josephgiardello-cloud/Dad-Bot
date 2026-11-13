@@ -9,6 +9,7 @@ from threading import Lock
 from typing import Any
 from uuid import uuid4
 
+from dadbot.core.agent_loop_outcome import AgentLoopOutcomeVerifier
 from dadbot.core.agent_loop_progress import (
     read_agent_loop_goal_blackboard,
     read_agent_loop_tool_outcome_evidence,
@@ -23,7 +24,12 @@ from dadbot.core.agent_loop_recovery import (
     validate_agent_loop_policy,
 )
 from dadbot.core.execution_contract import ExecutionEntry, TurnDelivery, live_turn_request
-from dadbot.runtime.agent_driver_loop import AgentDriverLoop, DriverLoopPolicy, DriverLoopResult
+from dadbot.runtime.agent_driver_loop import (
+    AgentDriverLoop,
+    AgentLoopOutcomeVerification,
+    DriverLoopPolicy,
+    DriverLoopResult,
+)
 from dadbot.runtime.context_pruner import ContextWindowPruner, build_pruned_observation_hook
 from dadbot.runtime.semantic_memory_bridge import (
     MemoryConsolidationJob,
@@ -282,6 +288,17 @@ class AssistantRuntime:
             raise RuntimeError("local_mcp_status is not available")
         return dict(status() or {})
 
+    @staticmethod
+    def _validate_outcome_verifier_configuration(
+        policy: DriverLoopPolicy,
+        outcome_verifier: AgentLoopOutcomeVerifier | None,
+        durable: bool,
+    ) -> None:
+        if bool(policy.outcome_verifier_id) != (outcome_verifier is not None):
+            raise ValueError("A versioned outcome verifier and matching policy ID are required")
+        if outcome_verifier is not None and not durable:
+            raise ValueError("Goal verification requires durable=True or resume=True for recovery")
+
     def start_browser_tools(self, *, restart: bool = False) -> dict[str, Any]:
         start = getattr(self.kernel, "start_local_mcp_server_process", None)
         if not callable(start):
@@ -324,6 +341,7 @@ class AssistantRuntime:
         semantic_sync_index: bool = False,
         durable: bool = False,
         resume: bool = False,
+        outcome_verifier: AgentLoopOutcomeVerifier | None = None,
     ) -> DriverLoopResult:
         from dadbot_system.delegation import require_tenant_authority_if_active
         from dadbot_system.security import AuthorizationError
@@ -333,14 +351,21 @@ class AssistantRuntime:
         require_tenant_authority_if_active(
             self._executive_task_tenant, required=self._executive_authority_required,
         )
+        selected_policy = policy or DriverLoopPolicy()
+        self._validate_outcome_verifier_configuration(
+            selected_policy,
+            outcome_verifier,
+            durable or resume,
+        )
         options = {
-            "policy": policy,
+            "policy": selected_policy,
             "session_id": session_id,
             "reflection_hook": reflection_hook,
             "observation_hook": observation_hook,
             "enable_semantic_memory": enable_semantic_memory,
             "semantic_top_k": semantic_top_k,
             "semantic_sync_index": semantic_sync_index,
+            "outcome_verifier": outcome_verifier,
         }
         tenant = self._executive_task_tenant
         orchestrator = getattr(self.kernel, "turn_orchestrator", None)
@@ -354,7 +379,7 @@ class AssistantRuntime:
         signer = control_plane.graph.receipt_signer
         if not signer.is_stable:
             raise RuntimeError("Durable agent loops require a stable execution receipt key")
-        loop_policy = asdict(policy or DriverLoopPolicy())
+        loop_policy = asdict(selected_policy)
         validate_agent_loop_policy(loop_policy)
         with agent_loop_recovery_lock(
             control_plane.ledger._backend, tenant_id=tenant, session_id=session_id,
@@ -380,7 +405,10 @@ class AssistantRuntime:
                     policy=loop_policy, last_action_input=initial_input,
                 )
             initial_reply = recover_agent_loop_cursor(
-                cursor, control_plane._ledger_index, signer,
+                cursor,
+                control_plane._ledger_index,
+                signer,
+                outcome_verifier=outcome_verifier,
             ) if resume else ""
             session = control_plane.registry.get_or_create(session_id, tenant_id=tenant)
             session["state"] = state
@@ -433,6 +461,7 @@ class AssistantRuntime:
         enable_semantic_memory: bool = True,
         semantic_top_k: int = 5,
         semantic_sync_index: bool = False,
+        outcome_verifier: AgentLoopOutcomeVerifier | None = None,
         recovery_cursor: AgentLoopCursor | None = None,
         persist_cursor: Any | None = None,
         initial_reply: str = "",
@@ -508,6 +537,17 @@ class AssistantRuntime:
             policy=loop_policy,
             allowed_tools=tool_names,
             commit_verifier=commit_verifier,
+            outcome_verification=(
+                AgentLoopOutcomeVerification(
+                    verifier=outcome_verifier,
+                    receipt_signer=getattr(
+                        getattr(control_plane, "graph", None),
+                        "receipt_signer",
+                        None,
+                    ),
+                )
+                if outcome_verifier is not None else None
+            ),
             recovery_cursor=recovery_cursor,
             persist_cursor=persist_cursor,
         )

@@ -1041,6 +1041,7 @@ Text: {summary}
                 updated_at=updated_at,
                 attributes={
                     "summary": summary,
+                    "supporting_source_ids": list(entry.get("supporting_source_ids", []))[:24],
                     "supporting_summaries": list(entry.get("supporting_summaries", []))[:4],
                     "contradictions": list(entry.get("contradictions", []))[:4],
                     "source_count": int(entry.get("source_count", 1) or 1),

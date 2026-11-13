@@ -7,9 +7,13 @@ from datetime import date, datetime
 from types import SimpleNamespace
 
 import pytest
+from pydantic import ValidationError
 
 from dadbot.managers.memory_coordination import MemoryCoordinator
-from dadbot.services.memory_service import extract_facts
+from dadbot.services.memory_service import (
+    extract_facts,
+    validate_memory_consolidation_proposals,
+)
 
 pytestmark = pytest.mark.unit
 
@@ -39,7 +43,7 @@ class DummyBot:
             return None
 
     def normalize_mood(self, mood):
-        _MOOD_MAP = {
+        mood_map = {
             "happy": "positive",
             "great": "positive",
             "good": "positive",
@@ -49,7 +53,7 @@ class DummyBot:
             "anxious": "anxious",
             "stressed": "anxious",
         }
-        return _MOOD_MAP.get(str(mood or "").lower().strip(), "neutral")
+        return mood_map.get(str(mood or "").lower().strip(), "neutral")
 
     def save_memory_catalog(self, catalog):
         self.saved_catalog = catalog
@@ -184,6 +188,41 @@ def test_memory_coordinator_builds_provenance_from_extracted_user_fact():
             },
         }
     ]
+
+
+def test_durable_consolidation_proposals_require_bounded_cited_output():
+    proposals = validate_memory_consolidation_proposals(
+        [{
+            "summary": "Tony is saving for a bike.",
+            "category": "finance",
+            "source_refs": ["work-1:memory:0"],
+        }]
+    )
+
+    assert proposals[0].source_refs == ["work-1:memory:0"]
+    with pytest.raises(ValidationError):
+        validate_memory_consolidation_proposals(
+            [{
+                "summary": "Tony is saving for a bike.",
+                "category": "finance",
+                "source_refs": ["work-1:memory:0", "work-1:memory:0"],
+            }]
+        )
+    with pytest.raises(ValidationError):
+        validate_memory_consolidation_proposals(
+            [{
+                "summary": "Tony is saving for a bike.",
+                "category": "finance",
+                "source_refs": ["work-1:memory:0"],
+                "confidence": 0.99,
+            }]
+        )
+    with pytest.raises(ValueError, match="six-proposal limit"):
+        validate_memory_consolidation_proposals([{
+            "summary": "Tony is saving for a bike.",
+            "category": "finance",
+            "source_refs": ["work-1:memory:0"],
+        }] * 7)
 
 
 def test_update_memory_store_skips_without_turn_context_even_if_commit_active(monkeypatch):

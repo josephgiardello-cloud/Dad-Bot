@@ -15,7 +15,12 @@ from typing import Any, Protocol, cast
 
 from dadbot.contracts import AttachmentList, FinalizedTurnResult
 from dadbot.core._control_plane_compaction import CompactionMixin
-from dadbot.core._control_plane_reconciliation import ReconciliationMixin
+from dadbot.core._control_plane_reconciliation import (
+    AgentLoopNoEffectAttestation as AgentLoopNoEffectAttestation,
+)
+from dadbot.core._control_plane_reconciliation import (
+    ReconciliationMixin,
+)
 from dadbot.core.adaptation_engine import AdaptationEngine
 from dadbot.core.behavior_alignment_trainer import BehaviorAlignmentTrainer
 from dadbot.core.belief_state_engine import BeliefStateEngine
@@ -82,11 +87,6 @@ from dadbot.core.control_plane_submit_failure import (
 )
 from dadbot.core.control_plane_submit_metadata import (
     _prepare_submit_metadata_impl,
-)
-from dadbot.core.tenant_session import (
-    current_tenant_id,
-    resolve_tenant_id,
-    tenant_session_scope,
 )
 from dadbot.core.control_plane_submit_phase import (
     _append_submit_turn_phase,
@@ -172,6 +172,11 @@ from dadbot.core.semantic_safety_engine import SemanticSafetyEngine
 from dadbot.core.session_planning_optimizer import SessionPlanningOptimizer
 from dadbot.core.session_store import SessionStore
 from dadbot.core.system_state_algebra import restore_system_state_projections
+from dadbot.core.tenant_session import (
+    current_tenant_id,
+    resolve_tenant_id,
+    tenant_session_scope,
+)
 from dadbot.core.tool_routing_engine import ToolRoutingEngine
 from dadbot.core.tool_self_model import ToolSelfModel
 from dadbot.core.topology_runtime import TopologyRuntime, TopologyValidationResult
@@ -2358,6 +2363,14 @@ class ExecutionControlPlane(ReconciliationMixin, CompactionMixin):
         metadata: dict[str, Any],
     ) -> None:
         self._enforce_distributed_runtime_authority(operation="replay_acceptance_gate")
+        if self._ledger_index.has_operator_confirmed_no_effect_for_request(
+            session_id=session_key,
+            request_id=request_id,
+            tenant_id=str(metadata.get("tenant_id") or ""),
+        ):
+            raise ReplayMismatch(
+                "Operator-reconciled requests require a new request identity; replay is forbidden",
+            )
         if self._request_has_ambiguous_inflight_effect_state(
             session_id=session_key,
             request_id=request_id,

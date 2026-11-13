@@ -4,7 +4,13 @@ from types import SimpleNamespace
 
 import pytest
 
-from dadbot.core.execution_ledger import IntegrityBreachError
+from dadbot.core.execution_ledger import ExecutionLedger, IntegrityBreachError
+from dadbot.core.ledger_backend import FileWALLedgerBackend
+from dadbot.core.local_tenant_establishment import commit_local_tenant, establish_local_tenant
+from dadbot.core.memory_consolidation_outbox import (
+    MEMORY_CONSOLIDATION_TURN_OUTCOME,
+    pending_memory_consolidation_work,
+)
 from dadbot.core.post_commit_events import POST_COMMIT_READY, PostCommitEvent
 from dadbot.core.runtime_errors import InvariantViolation, PersistenceFailure
 from dadbot.services.persistence import PersistenceService
@@ -150,6 +156,32 @@ def _make_turn_context(*, trace_id: str = "trace-123", session_id: str = "sessio
     )
 
 
+def _make_outbox_ledger(tmp_path, *, trace_id: str, session_id: str) -> ExecutionLedger:
+    backend = FileWALLedgerBackend(tmp_path / "ledger")
+    establish_local_tenant(
+        backend,
+        "tenant-1",
+        lambda: {"memories": []},
+        lambda _state: None,
+    )
+    ledger = ExecutionLedger(backend)
+    ledger.load_from_backend()
+    commit_local_tenant(
+        backend,
+        "tenant-1",
+        1,
+        "source-op",
+        {"memories": ["new memory"]},
+        lambda: None,
+        lambda _state: None,
+        execution_ledger=ledger,
+        session_id=session_id,
+        trace_id=trace_id,
+        enqueue_consolidation=True,
+    )
+    return ledger
+
+
 def _checkpoint_snapshot_factory(*, trace_id: str) -> object:
     def _snapshot(*, stage: str, status: str, error: str | None = None):
         return {
@@ -183,6 +215,53 @@ def test_finalize_turn_emits_post_commit_event_once_on_success():
     assert event.payload["turn_context"] is turn_context
     assert relationship_manager.calls == [turn_context]
     assert graph_manager.calls == [turn_context]
+
+
+def test_finalize_turn_records_durable_success_for_consolidation(tmp_path):
+    runtime, _event_bus, _memory_coordinator, _relationship_manager, _graph_manager, _memory_runtime = _make_runtime()
+    turn_context = _make_turn_context(trace_id="trace-success", session_id="session-success")
+    runtime._execution_ledger = _make_outbox_ledger(
+        tmp_path,
+        trace_id=turn_context.trace_id,
+        session_id=turn_context.metadata["control_plane"]["session_id"],
+    )
+    service = PersistenceService(_PersistenceManagerStub(), turn_service=_TurnServiceStub(runtime))
+
+    assert service.finalize_turn(turn_context, ("done", False)) == ("done", False)
+
+    outcome_events = [
+        event for event in runtime._execution_ledger.read()
+        if event.get("type") == MEMORY_CONSOLIDATION_TURN_OUTCOME
+    ]
+    assert len(outcome_events) == 1
+    assert outcome_events[0]["payload"]["status"] == "succeeded"
+    pending = pending_memory_consolidation_work(
+        runtime._execution_ledger.read(),
+        tenant_id="tenant-1",
+    )
+    assert pending[0]["turn_outcome_status"] == "succeeded"
+
+
+def test_failed_finalize_records_failure_and_never_qualifies_consolidation(tmp_path):
+    runtime, _event_bus, _memory_coordinator, _relationship_manager, _graph_manager, _memory_runtime = _make_runtime(
+        graph_sync_fails=True,
+    )
+    turn_context = _make_turn_context(trace_id="trace-failed", session_id="session-failed")
+    runtime._execution_ledger = _make_outbox_ledger(
+        tmp_path,
+        trace_id=turn_context.trace_id,
+        session_id=turn_context.metadata["control_plane"]["session_id"],
+    )
+    service = PersistenceService(_PersistenceManagerStub(), turn_service=_TurnServiceStub(runtime))
+
+    with pytest.raises(PersistenceFailure, match="strict-mode failure"):
+        service.finalize_turn(turn_context, ("done", False))
+
+    pending = pending_memory_consolidation_work(
+        runtime._execution_ledger.read(),
+        tenant_id="tenant-1",
+    )
+    assert pending[0]["turn_outcome_status"] == "failed"
 
 
 def test_finalize_turn_publishes_ephemeral_event_with_durable_event_bus():
@@ -329,11 +408,11 @@ def test_emitted_post_commit_event_can_be_replayed_from_retained_bus_history():
     worker._capability = PostCommitWorker.__init__.__class__  # satisfy __slots__ check
     from dadbot.services.post_commit_worker import _PostCommitCapability
     worker._capability = _PostCommitCapability(runtime)
+    worker._initialize_retry_tracking()
     worker._handle_post_commit_event(retained_event)
 
-    assert len(memory_coordinator.consolidate_calls) == 1
+    assert memory_coordinator.consolidate_calls == []
     assert len(memory_coordinator.forgetting_calls) == 1
-    assert memory_coordinator.consolidate_calls[0] is turn_context
     assert memory_coordinator.forgetting_calls[0] is turn_context
     intents = list(turn_context.state.get("memory_write_intents") or [])
     assert len(intents) >= 4

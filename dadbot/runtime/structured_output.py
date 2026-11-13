@@ -60,7 +60,7 @@ class AgentPlan(BaseModel):
     goal_updates: dict[StrictStr, StrictStr] = Field(
         default_factory=dict,
         max_length=16,
-        description="Short, evidence-based updates to the loop's goal blackboard",
+        description="Proposed progress updates; these do not verify goal completion",
     )
 
     @field_validator("action_input")
@@ -164,6 +164,8 @@ blackboard only with concise facts supported by the current context. Do not
 include private chain-of-thought; reasoning should be a short decision summary.
 Treat hash-only tool outcome evidence as an observation, not proof of a goal
 postcondition or authorization to perform a follow-up action.
+The goal blackboard contains proposed progress updates, not proof of completion.
+Only a configured deterministic outcome verifier can report goal_status=satisfied.
 Treat memory conflict and timestamp signals as evidence to check, not settled
 truth. Surface unresolved conflicts and use dates to qualify recency.
 
@@ -197,6 +199,7 @@ def build_reflection_prompt(
             "initial_observation": ctx.get("initial_observation", ""),
             "last_reply": ctx.get("last_reply", ""),
             "goal_blackboard": ctx.get("goal_blackboard", {}),
+            "goal_status": ctx.get("goal_status", "unverified"),
             "tool_outcome_evidence": ctx.get("tool_outcome_evidence", {}),
             "memory_signals": ctx.get("memory_signals", {}),
             "completed_turns": len(ctx.get("records", [])),

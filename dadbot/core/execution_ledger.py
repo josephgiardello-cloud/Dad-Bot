@@ -450,6 +450,14 @@ class ExecutionLedger:
             self._ensure_backend_reconciled()
             return replay_tenant_memory(self._events, tenant_id)
 
+    def replay_tenant_memory_at_revision(self, tenant_id: str, revision: int):
+        from dadbot.core.tenant_memory_ledger import replay_tenant_memory_at_revision
+
+        self._authorize_tenant_memory(tenant_id)
+        with self._lock:
+            self._ensure_backend_reconciled()
+            return replay_tenant_memory_at_revision(self._events, tenant_id, revision)
+
     def refresh_tenant_memory(self, tenant_id: str):
         """Reload a reconciled ledger before consulting a tenant projection."""
         self._authorize_tenant_memory(tenant_id)

@@ -573,6 +573,62 @@ class TestExecutionReceipt:
         )
         assert not signer2.verify(receipt)
 
+    def test_rotated_signer_verifies_only_configured_previous_keys(self) -> None:
+        from dadbot.core.execution_receipt import ReceiptSigner
+
+        previous_key = b"previous-receipt-key-material-00001"
+        signer = ReceiptSigner(secret_key=previous_key)
+        receipt = signer.sign(
+            turn_id="t",
+            stage="save",
+            sequence=1,
+            stage_call_id="call",
+            checkpoint_hash="hash",
+            prev_receipt_sig="",
+        )
+        rotated = ReceiptSigner(
+            secret_key=b"current-receipt-key-material-00001",
+            verification_keys=(previous_key,),
+        )
+        unrelated = ReceiptSigner(secret_key=b"unrelated-receipt-key-material-01")
+
+        assert rotated.can_verify_key_id(signer.key_id)
+        assert rotated.verify(receipt, key_id=signer.key_id)
+        assert not rotated.verify(receipt, key_id=rotated.key_id)
+        assert not unrelated.can_verify_key_id(signer.key_id)
+        assert not unrelated.verify(receipt)
+
+    def test_verification_keys_are_loaded_from_json_environment(self, monkeypatch) -> None:
+        import json
+
+        from dadbot.core.execution_receipt import ReceiptSigner
+
+        previous_key = b"previous-receipt-key-material-00001"
+        monkeypatch.setenv("DADBOT_RECEIPT_KEY", "current-receipt-key-material-00001")
+        monkeypatch.setenv("DADBOT_RECEIPT_VERIFY_KEYS", json.dumps([previous_key.decode()]))
+        signer = ReceiptSigner()
+        receipt = ReceiptSigner(secret_key=previous_key).sign(
+            turn_id="t",
+            stage="save",
+            sequence=1,
+            stage_call_id="call",
+            checkpoint_hash="hash",
+            prev_receipt_sig="",
+        )
+
+        assert signer.verify(receipt)
+
+    def test_invalid_verification_key_configuration_fails_explicitly(self, monkeypatch) -> None:
+        from dadbot.core.execution_receipt import ReceiptSigner
+
+        monkeypatch.setenv("DADBOT_RECEIPT_VERIFY_KEYS", "not-json")
+        with pytest.raises(ValueError, match="DADBOT_RECEIPT_VERIFY_KEYS"):
+            ReceiptSigner(secret_key=b"current-receipt-key-material-00001")
+
+        monkeypatch.setenv("DADBOT_RECEIPT_VERIFY_KEYS", '["short"]')
+        with pytest.raises(ValueError, match="at least 32 bytes"):
+            ReceiptSigner(secret_key=b"current-receipt-key-material-00001")
+
     def test_round_trip_via_dict(self) -> None:
         from dadbot.core.execution_receipt import ExecutionReceipt, ReceiptSigner
 

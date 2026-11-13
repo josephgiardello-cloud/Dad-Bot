@@ -44,11 +44,68 @@ def canonical_loop_bot(make_test_dadbot, monkeypatch, tmp_path):
 def _run_durable(bot, **kwargs):
     from dadbot.assistant_runtime import AssistantRuntime
 
-    return AssistantRuntime(bot).run_agent_loop(
-        "bounded goal", session_id=SESSION, policy=DriverLoopPolicy(max_turns=2),
-        reflection_hook=lambda _ctx: {"action_input": "perform bounded work"},
-        enable_semantic_memory=False, **kwargs,
+    outcome_verifier = kwargs.pop("outcome_verifier", None)
+    outcome_verifier_id = kwargs.pop("outcome_verifier_id", "")
+    policy = kwargs.pop(
+        "policy",
+        DriverLoopPolicy(max_turns=2, outcome_verifier_id=outcome_verifier_id),
     )
+    reflection_hook = kwargs.pop(
+        "reflection_hook",
+        lambda _ctx: {"action_input": "perform bounded work"},
+    )
+    return AssistantRuntime(bot).run_agent_loop(
+        "bounded goal",
+        session_id=SESSION,
+        policy=policy,
+        reflection_hook=reflection_hook,
+        enable_semantic_memory=False,
+        outcome_verifier=outcome_verifier,
+        **kwargs,
+    )
+
+
+def _seed_operator_reconciliation_dispatch(control_plane, request_id: str) -> str:
+    from dadbot.core.control_plane import ExecutionJob
+    from dadbot.core.ledger_writer import LedgerWriter
+
+    job = ExecutionJob(
+        session_id=SESSION,
+        user_input="perform bounded work",
+        tenant_id=TENANT,
+        metadata={"request_id": request_id, "tenant_id": TENANT},
+    )
+    writer = LedgerWriter(control_plane.ledger)
+    writer.append_job_submitted(job)
+    writer.append_job_queued(job)
+    writer.append_job_started(job)
+    effect_id = "effect-operator-attested"
+    writer.append_effect_begin(
+        session_id=SESSION,
+        tenant_id=TENANT,
+        trace_token=job.trace_id,
+        effect_id=effect_id,
+        request_id=request_id,
+    )
+    return effect_id
+
+
+def _create_admin_runtime_authority(tmp_path, tenant_id: str):
+    from dadbot_system.delegation import SQLiteDelegationStore
+    from dadbot_system.security import ServiceTokenManager
+
+    path = str(tmp_path / "loop-reconcile-authority.sqlite")
+    SQLiteDelegationStore.initialize(path)
+    store = SQLiteDelegationStore(path, "loop-reconcile-authority")
+    tokens = ServiceTokenManager("loop-reconcile-authority")
+    principal = tokens.verify(tokens.issue(subject="loop-operator", tenant_id=tenant_id, scopes={"admin"}))
+    store.grant_membership(
+        issuer="dadbot",
+        subject=principal.subject,
+        tenant_id=tenant_id,
+        scopes={"admin"},
+    )
+    return store, principal
 
 
 def test_production_resume_reconciles_committed_dispatch_without_reexecution(canonical_loop_bot, monkeypatch):
@@ -162,21 +219,320 @@ def test_production_resume_rejects_rotated_receipt_key_without_dispatch(canonica
     assert control_plane.ledger.event_count() == before
 
 
-def test_production_resume_refuses_uncertain_dispatch(canonical_loop_bot, monkeypatch):
-    bot = canonical_loop_bot
+def test_production_resume_accepts_explicit_previous_receipt_key(canonical_loop_bot, monkeypatch):
+    from dadbot.core.execution_receipt import ReceiptSigner
 
-    def crash_before_completion(_request, **_kwargs):
+    bot = canonical_loop_bot
+    control_plane = bot.services.turn_orchestrator.control_plane
+    previous_key = b"previous-receipt-key-material-00001"
+    current_key = b"current-receipt-key-material-00001"
+    control_plane.graph.configure_receipt_signer(ReceiptSigner(previous_key))
+    original = bot.execute_turn
+    first_request_ids = []
+
+    def crash_after_commit(request, **kwargs):
+        first_request_ids.append(request.metadata["request_id"])
+        original(request, **kwargs)
+        raise SystemExit("lost response after commit")
+
+    monkeypatch.setattr(bot, "execute_turn", crash_after_commit)
+    with pytest.raises(SystemExit, match="lost response after commit"):
+        _run_durable(bot, durable=True)
+
+    control_plane.graph.configure_receipt_signer(
+        ReceiptSigner(current_key, verification_keys=(previous_key,)),
+    )
+    second_request_ids = []
+
+    def record_resumed_dispatch(request, **kwargs):
+        second_request_ids.append(request.metadata["request_id"])
+        return original(request, **kwargs)
+
+    monkeypatch.setattr(bot, "execute_turn", record_resumed_dispatch)
+    resumed = _run_durable(bot, resume=True)
+
+    assert resumed.completed_turns == 2
+    assert [record.turn_index for record in resumed.records] == [2]
+    assert len(first_request_ids) == 1
+    assert len(second_request_ids) == 1
+    previous_completion = control_plane._ledger_index.completed_metadata(
+        session_id=SESSION, request_id=first_request_ids[0], tenant_id=TENANT,
+    )
+    current_completion = control_plane._ledger_index.completed_metadata(
+        session_id=SESSION, request_id=second_request_ids[0], tenant_id=TENANT,
+    )
+    assert previous_completion["metadata"]["execution_receipt_evidence"]["key_id"] == (
+        ReceiptSigner(previous_key).key_id
+    )
+    assert current_completion["metadata"]["execution_receipt_evidence"]["key_id"] == (
+        ReceiptSigner(current_key).key_id
+    )
+
+
+def test_production_resume_rechecks_postconditions_before_any_new_dispatch(canonical_loop_bot, monkeypatch):
+    bot = canonical_loop_bot
+    control_plane = bot.services.turn_orchestrator.control_plane
+    original = bot.execute_turn
+    request_ids = []
+    checked = []
+
+    def crash_after_commit(request, **kwargs):
+        request_ids.append(request.metadata["request_id"])
+        original(request, **kwargs)
+        raise SystemExit("lost response after commit")
+
+    def outcome_verifier(evidence):
+        checked.append(evidence)
+        return "satisfied"
+
+    monkeypatch.setattr(bot, "execute_turn", crash_after_commit)
+    with pytest.raises(SystemExit, match="lost response after commit"):
+        _run_durable(
+            bot,
+            durable=True,
+            outcome_verifier=outcome_verifier,
+            outcome_verifier_id="test.goal.v1",
+        )
+
+    def forbidden_dispatch(*_args, **_kwargs):
+        pytest.fail("A satisfied recovered goal must stop before another dispatch")
+
+    monkeypatch.setattr(bot, "execute_turn", forbidden_dispatch)
+    resumed = _run_durable(
+        bot,
+        resume=True,
+        outcome_verifier=outcome_verifier,
+        outcome_verifier_id="test.goal.v1",
+    )
+
+    assert resumed.goal_status == "satisfied"
+    assert resumed.stop_reason == "goal_satisfied"
+    assert resumed.completed_turns == 1
+    assert len(request_ids) == 1
+    assert len(checked) == 1
+    assert checked[0].request_id == request_ids[0]
+    assert checked[0].execution_receipt_evidence["key_id"] == (
+        control_plane.graph.receipt_signer.key_id
+    )
+
+
+def test_goal_verifier_requires_durable_loop_recovery(canonical_loop_bot):
+    with pytest.raises(ValueError, match="requires durable=True"):
+        _run_durable(
+            canonical_loop_bot,
+            outcome_verifier=lambda _evidence: "satisfied",
+            outcome_verifier_id="test.goal.v1",
+        )
+
+
+def test_production_resume_retries_only_pre_submission_failure(canonical_loop_bot, monkeypatch):
+    bot = canonical_loop_bot
+    original = bot.execute_turn
+    request_ids = []
+    observations = []
+
+    def crash_before_submission(request, **kwargs):
+        request_ids.append(request.metadata["request_id"])
+        if len(request_ids) == 1:
+            raise SystemExit("lost before submission")
+        return original(request, **kwargs)
+
+    monkeypatch.setattr(bot, "execute_turn", crash_before_submission)
+    with pytest.raises(SystemExit, match="lost before submission"):
+        _run_durable(bot, durable=True)
+    resumed = _run_durable(
+        bot,
+        resume=True,
+        reflection_hook=lambda ctx: (
+            observations.append(ctx["system_observation"]) or {"action_input": "perform bounded work"}
+        ),
+    )
+    assert len(request_ids) == 2
+    assert request_ids[0] != request_ids[1]
+    assert resumed.failures == 1
+    assert resumed.completed_turns == 1
+    assert resumed.stop_reason == "max_turns"
+    assert any("no canonical submission or effect evidence" in item for item in observations)
+
+
+@pytest.mark.parametrize("evidence_type", ["submitted", "effect", "unattested_reconciliation"])
+def test_production_resume_refuses_dispatch_evidence_without_completion(
+    canonical_loop_bot,
+    monkeypatch,
+    evidence_type,
+):
+    from dadbot.core.control_plane import ExecutionJob
+    from dadbot.core.ledger_writer import LedgerWriter
+
+    bot = canonical_loop_bot
+    control_plane = bot.services.turn_orchestrator.control_plane
+    request_ids = []
+
+    def crash_before_completion(request, **_kwargs):
+        request_ids.append(request.metadata["request_id"])
         raise SystemExit("lost dispatch")
 
     monkeypatch.setattr(bot, "execute_turn", crash_before_completion)
     with pytest.raises(SystemExit, match="lost dispatch"):
         _run_durable(bot, durable=True)
+    submitted_job = ExecutionJob(
+        session_id=SESSION,
+        user_input="perform bounded work",
+        tenant_id=TENANT,
+        metadata={"request_id": request_ids[0], "tenant_id": TENANT},
+    )
+    writer = LedgerWriter(control_plane.ledger)
+    if evidence_type == "submitted":
+        writer.append_job_submitted(submitted_job)
+    elif evidence_type == "effect":
+        writer.append_effect_begin(
+            session_id=SESSION,
+            tenant_id=TENANT,
+            trace_token=submitted_job.trace_id,
+            effect_id="effect-before-completion",
+            request_id=request_ids[0],
+        )
+    else:
+        writer.append_job_started(submitted_job)
+        writer.append_effect_begin(
+            session_id=SESSION,
+            tenant_id=TENANT,
+            trace_token=submitted_job.trace_id,
+            effect_id="effect-before-completion",
+            request_id=request_ids[0],
+        )
+        control_plane.apply_reconciliation(
+            session_id=SESSION,
+            tenant_id=TENANT,
+            request_id=request_ids[0],
+            effect_id="effect-before-completion",
+            mode="resume_eligible",
+        )
     with pytest.raises(RuntimeError, match=r"uncertain.*resend"):
         _run_durable(bot, resume=True)
+    assert len(request_ids) == 1
     with pytest.raises(RuntimeError, match="explicitly resumed"):
         _run_durable(bot, durable=True)
     with pytest.raises(RuntimeError, match="explicitly resumed"):
         _run_durable(bot)
+
+
+def test_operator_attested_no_effect_reconciliation_advances_failed_turn(
+    canonical_loop_bot,
+    monkeypatch,
+    tmp_path,
+):
+    import asyncio
+
+    from dadbot.core.control_plane import AgentLoopNoEffectAttestation
+    from dadbot.core.runtime_errors import ReplayMismatch
+    from dadbot.core.session_store import SessionStore
+    from dadbot_system.delegation import runtime_authority_scope
+
+    bot = canonical_loop_bot
+    control_plane = bot.services.turn_orchestrator.control_plane
+    original = bot.execute_turn
+    request_ids = []
+
+    def crash_after_start(request, **_kwargs):
+        request_ids.append(request.metadata["request_id"])
+        raise SystemExit("lost after dispatch start")
+
+    monkeypatch.setattr(bot, "execute_turn", crash_after_start)
+    with pytest.raises(SystemExit, match="lost after dispatch start"):
+        _run_durable(bot, durable=True)
+
+    effect_id = _seed_operator_reconciliation_dispatch(control_plane, request_ids[0])
+    state = SessionStore.projected_from_ledger(ledger=control_plane.ledger).get(SESSION, tenant_id=TENANT)
+    assert state is not None
+    cursor = state["agent_loop_cursor"]
+    assert isinstance(cursor, dict)
+    attestation = AgentLoopNoEffectAttestation(
+        session_id=SESSION,
+        tenant_id=TENANT,
+        request_id=request_ids[0],
+        loop_run_id=cursor["loop_run_id"],
+        turn_index=cursor["next_turn"],
+        confirmed_no_external_effect=True,
+        execution_quiesced=True,
+    )
+
+    before = control_plane.ledger.event_count()
+    with pytest.raises(AuthorizationError, match="administrator"):
+        control_plane.attest_agent_loop_dispatch_not_applied(attestation)
+    assert control_plane.ledger.event_count() == before
+
+    store, principal = _create_admin_runtime_authority(tmp_path, TENANT)
+    with runtime_authority_scope(store, principal, scope="admin", tenant_id=TENANT):
+        report = control_plane.attest_agent_loop_dispatch_not_applied(attestation)
+    assert report["applied"] is True
+    reconciled = [
+        event for event in control_plane.ledger.read(
+            event_types=frozenset({"AGENT_LOOP_NO_EFFECT_CONFIRMED"}),
+        )
+        if str(event.get("payload", {}).get("request_id") or "") == request_ids[0]
+    ][-1]
+    persisted_attestation = reconciled["payload"]
+    assert persisted_attestation["confirmed_no_external_effect"] is True
+    assert persisted_attestation["execution_quiesced"] is True
+    assert persisted_attestation["operator_ref"]
+    assert SessionStore.projected_from_ledger(ledger=control_plane.ledger).pending_jobs() == []
+    assert not control_plane._ledger_index.has_ambiguous_effect_inflight(
+        session_id=SESSION,
+        effect_id=effect_id,
+        tenant_id=TENANT,
+    )
+    assert not control_plane._ledger_index.is_effect_committed(
+        session_id=SESSION,
+        effect_id=effect_id,
+        tenant_id=TENANT,
+    )
+
+    with pytest.raises(ReplayMismatch, match="new request identity"):
+        asyncio.run(
+            control_plane.submit_turn(
+                session_id=SESSION,
+                user_input="perform bounded work",
+                metadata={
+                    "tenant_id": TENANT,
+                    "request_id": request_ids[0],
+                    "effect_id": effect_id,
+                },
+            )
+        )
+
+    monkeypatch.setattr(bot, "execute_turn", original)
+    observations = []
+    resumed = _run_durable(
+        bot,
+        resume=True,
+        reflection_hook=lambda ctx: (
+            observations.append(ctx["system_observation"]) or {"action_input": "perform bounded work"}
+        ),
+    )
+    assert len(request_ids) == 1
+    assert resumed.failures == 1
+    assert resumed.completed_turns == 1
+    assert resumed.stop_reason == "max_turns"
+    assert any("authorized operator confirmed" in item for item in observations)
+
+
+def test_pre_submission_recovery_respects_failure_budget(canonical_loop_bot, monkeypatch):
+    bot = canonical_loop_bot
+    attempts = []
+
+    def crash_before_submission(_request, **_kwargs):
+        attempts.append(1)
+        raise SystemExit("lost before submission")
+
+    monkeypatch.setattr(bot, "execute_turn", crash_before_submission)
+    policy = DriverLoopPolicy(max_turns=3, max_failures=0)
+    with pytest.raises(SystemExit, match="lost before submission"):
+        _run_durable(bot, durable=True, policy=policy)
+    resumed = _run_durable(bot, resume=True, policy=policy)
+    assert attempts == [1]
+    assert resumed.failures == 1
+    assert resumed.stop_reason == "failure_budget"
 
 
 @pytest.mark.parametrize("damage", ["owner", "budget"])
